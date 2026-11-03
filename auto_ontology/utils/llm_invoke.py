@@ -63,6 +63,14 @@ LLM_INVOKE_TIMEOUT_S = int(os.environ.get("LLM_INVOKE_TIMEOUT_S", "120"))
 # applies it for the duration of a block. See `run_semantic_compilation`.
 LLM_MAX_INFLIGHT = int(os.environ.get("LLM_MAX_INFLIGHT", "0"))
 
+# Opt-in Anthropic prompt-cache breakpoint on the system prompt of Claude calls.
+# Off by default: NVIDIA's inference-api gateway attaches its own markers (see
+# `_system_messages_first`), and a second set would conflict. Enable it on
+# OpenAI-compatible gateways that forward `cache_control` but add none.
+LLM_PROMPT_CACHE_MARKERS = os.environ.get(
+    "LLM_PROMPT_CACHE_MARKERS", ""
+).strip().lower() in {"1", "true", "yes", "on"}
+
 # The process-wide default, from the environment. None means unbounded. This is
 # what the guard falls back to whenever no `limit_inflight` block is active.
 _ENV_INFLIGHT: threading.BoundedSemaphore | None = (
@@ -449,6 +457,77 @@ def _system_messages_first(
     return system + rest
 
 
+def _has_cache_marker(message: BaseMessage) -> bool:
+    content = message.content
+    return isinstance(content, list) and any(
+        isinstance(block, dict) and "cache_control" in block for block in content
+    )
+
+
+def _mark_prompt_cache(
+    llm: BaseChatModel, messages: list[BaseMessage]
+) -> list[BaseMessage]:
+    """Put one Anthropic cache breakpoint at the end of the last system message.
+
+    Behind an OpenAI-compatible gateway that does not add markers itself, Claude
+    caches nothing unless the request carries ``cache_control``: the same ~14k
+    token system prompt sent twice reported ``cached_tokens=0`` both times, and
+    14023 on the second call once marked. After ``_system_messages_first`` the
+    last system message ends the static prefix, so one breakpoint there covers
+    every system message. ``langchain-openai`` forwards content-block keys it
+    does not know, so the marker reaches the wire as written.
+
+    No-op unless ``LLM_PROMPT_CACHE_MARKERS`` is set and *llm* is Claude, when
+    there is no system message, or when a caller already placed a marker —
+    Anthropic allows at most four per request. Inputs are never mutated.
+    """
+    if not (LLM_PROMPT_CACHE_MARKERS and _is_claude(llm)):
+        return messages
+    if any(_has_cache_marker(m) for m in messages):
+        return messages
+    index = next(
+        (
+            i
+            for i in range(len(messages) - 1, -1, -1)
+            if isinstance(messages[i], SystemMessage)
+        ),
+        None,
+    )
+    if index is None:
+        return messages
+
+    content = messages[index].content
+    if isinstance(content, str):
+        blocks: list = [{"type": "text", "text": content}]
+    else:
+        blocks = list(content)
+    for i in range(len(blocks) - 1, -1, -1):
+        block = blocks[i]
+        if isinstance(block, str):
+            blocks[i] = {
+                "type": "text",
+                "text": block,
+                "cache_control": {"type": "ephemeral"},
+            }
+            break
+        if isinstance(block, dict) and block.get("type") == "text":
+            blocks[i] = {**block, "cache_control": {"type": "ephemeral"}}
+            break
+    else:
+        return messages
+
+    marked = list(messages)
+    marked[index] = messages[index].model_copy(update={"content": blocks})
+    return marked
+
+
+def _prepare_messages(
+    llm: BaseChatModel, messages: list[BaseMessage]
+) -> list[BaseMessage]:
+    """Shape *messages* for *llm* just before they are sent."""
+    return _mark_prompt_cache(llm, _system_messages_first(llm, messages))
+
+
 def _structured_output_kwargs(llm: BaseChatModel) -> dict:
     """Pick the ``with_structured_output`` method for *llm*.
 
@@ -478,7 +557,7 @@ def _structured_output_kwargs(llm: BaseChatModel) -> dict:
 
 
 def _invoke_text_once(llm: BaseChatModel, prompt: str) -> str:
-    response = llm.invoke([HumanMessage(content=prompt)])
+    response = llm.invoke(_prepare_messages(llm, [HumanMessage(content=prompt)]))
     content = getattr(response, "content", response)
     return content if isinstance(content, str) else str(content)
 
@@ -506,7 +585,7 @@ def invoke_text(llm: BaseChatModel, prompt: str) -> str:
 
 def _safe_invoke_text(llm: BaseChatModel, prompt: str) -> str:
     """invoke_text with retry/backoff for 503/429 and the inflight semaphore."""
-    messages = [HumanMessage(content=prompt)]
+    messages = _prepare_messages(llm, [HumanMessage(content=prompt)])
     for attempt in range(RETRY_MAX_ATTEMPTS):
         try:
             with _inflight_guard():
@@ -567,7 +646,7 @@ def safe_invoke_with_structured_output(
         try:
             model_llm = llm.with_structured_output(schema, **structured_kwargs)
             with _inflight_guard():
-                result = model_llm.invoke(_system_messages_first(llm, current_messages))
+                result = model_llm.invoke(_prepare_messages(llm, current_messages))
         except _requests.exceptions.ReadTimeout:
             logger.error(
                 "LLM invoke timed out after %ds on attempt %d/%d for %s",

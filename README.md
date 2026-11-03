@@ -411,6 +411,16 @@ that support structured output, and keep the embedding model the same for
 ingestion and queries. [`.env.example`](./.env.example) documents every
 variable.
 
+#### Prompt caching for Claude
+
+Set `LLM_PROMPT_CACHE_MARKERS=true` when Claude models are served through an
+OpenAI-compatible gateway, such as LiteLLM or Bifrost, that doesn't add
+Anthropic prompt-cache markers itself. Each Claude request then carries one
+`cache_control: {"type": "ephemeral"}` breakpoint at the end of its system
+prompt, so repeated schema and system prompts are read from cache instead of
+billed in full. Leave it off (the default) on gateways that already attach
+markers, such as NVIDIA's inference-api. Other models are unaffected.
+
 ### Predictions
 
 Set `KUMO_RFM_API_KEY` and the agent routes predictive questions to KumoRFM.

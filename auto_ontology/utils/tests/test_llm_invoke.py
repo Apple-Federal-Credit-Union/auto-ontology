@@ -143,6 +143,149 @@ def test_validation_retry_note_reaches_claude_ahead_of_the_conversation() -> Non
     assert roles == ["system", "system", "human"]
 
 
+_CLAUDE = "azure/claude-opus-5-5-fast"
+
+
+def _markers(messages: list[BaseMessage]) -> list[tuple[int, int]]:
+    """(message index, block index) of every cache_control block."""
+    return [
+        (i, j)
+        for i, m in enumerate(messages)
+        if isinstance(m.content, list)
+        for j, block in enumerate(m.content)
+        if isinstance(block, dict) and "cache_control" in block
+    ]
+
+
+@pytest.fixture
+def cache_markers_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(llm_invoke, "LLM_PROMPT_CACHE_MARKERS", True)
+
+
+def test_cache_markers_are_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The inference-api gateway adds its own markers; a second set would conflict."""
+    monkeypatch.setattr(llm_invoke, "LLM_PROMPT_CACHE_MARKERS", False)
+    messages = _interleaved()
+
+    assert (
+        llm_invoke._mark_prompt_cache(_Model(_CLAUDE), messages) is messages  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.usefixtures("cache_markers_on")
+def test_claude_gets_one_marker_on_the_last_system_block() -> None:
+    original = _interleaved()
+    prepared = llm_invoke._prepare_messages(_Model(_CLAUDE), original)  # type: ignore[arg-type]
+
+    assert _markers(prepared) == [(2, 0)]
+    assert prepared[2].content == [
+        {"type": "text", "text": "anchors", "cache_control": {"type": "ephemeral"}}
+    ]
+    assert [m.content for m in prepared[:2]] == ["role", "evidence"]
+    assert original[3].content == "anchors", "input message was mutated"
+
+
+@pytest.mark.usefixtures("cache_markers_on")
+def test_other_models_get_no_cache_marker() -> None:
+    messages = _interleaved()
+
+    assert (
+        llm_invoke._mark_prompt_cache(
+            _Model("nvidia/nemotron-3-nano-30b-a3b"), messages
+        )  # type: ignore[arg-type]
+        is messages
+    )
+
+
+@pytest.mark.usefixtures("cache_markers_on")
+def test_list_content_marks_its_last_text_block() -> None:
+    blocks = [
+        {"type": "text", "text": "schema"},
+        {"type": "text", "text": "rules"},
+        {"type": "image_url", "image_url": {"url": "data:,"}},
+    ]
+    messages = [SystemMessage(content=blocks), HumanMessage(content="q")]
+
+    prepared = llm_invoke._mark_prompt_cache(_Model(_CLAUDE), messages)  # type: ignore[arg-type]
+
+    assert _markers(prepared) == [(0, 1)]
+    assert "cache_control" not in blocks[1], "input block was mutated"
+
+
+@pytest.mark.usefixtures("cache_markers_on")
+def test_an_existing_marker_is_left_as_the_only_one() -> None:
+    messages = [
+        SystemMessage(content="role"),
+        SystemMessage(
+            content=[
+                {"type": "text", "text": "x", "cache_control": {"type": "ephemeral"}}
+            ]
+        ),
+        SystemMessage(content="late"),
+        HumanMessage(content="q"),
+    ]
+
+    assert llm_invoke._mark_prompt_cache(_Model(_CLAUDE), messages) is messages  # type: ignore[arg-type]
+
+
+@pytest.mark.usefixtures("cache_markers_on")
+def test_a_prompt_without_system_messages_is_unchanged() -> None:
+    messages: list[BaseMessage] = [HumanMessage(content="q")]
+
+    assert llm_invoke._mark_prompt_cache(_Model(_CLAUDE), messages) is messages  # type: ignore[arg-type]
+
+
+@pytest.mark.usefixtures("cache_markers_on")
+def test_marker_survives_langchain_openai_serialization() -> None:
+    """ChatOpenAI must forward the block key; the gateway drops nothing else."""
+    from langchain_openai import ChatOpenAI
+
+    llm = ChatOpenAI(model=_CLAUDE, api_key="sk-test", base_url="http://localhost:1")
+    prepared = llm_invoke._prepare_messages(llm, _interleaved())
+
+    payload = llm._get_request_payload(prepared)
+
+    marked = [
+        (m["role"], block)
+        for m in payload["messages"]
+        if isinstance(m["content"], list)
+        for block in m["content"]
+        if "cache_control" in block
+    ]
+    assert marked == [
+        (
+            "system",
+            {
+                "type": "text",
+                "text": "anchors",
+                "cache_control": {"type": "ephemeral"},
+            },
+        )
+    ]
+
+
+@pytest.mark.usefixtures("cache_markers_on")
+def test_structured_output_sends_the_marker_to_claude() -> None:
+    sent: list[list[BaseMessage]] = []
+
+    class _Structured:
+        def invoke(self, messages: list[BaseMessage]) -> _SystemCheckModel:
+            sent.append(messages)
+            return _SystemCheckModel(answer="ok")
+
+    class _Claude(_Model):
+        def with_structured_output(self, *_args: Any, **_kwargs: Any) -> _Structured:
+            return _Structured()
+
+    llm_invoke.safe_invoke_with_structured_output(
+        _Claude(_CLAUDE),  # type: ignore[arg-type]
+        _interleaved(),
+        _SystemCheckModel,
+    )
+
+    assert _markers(sent[0]) == [(2, 0)]
+
+
 def _bound() -> int | None:
     """Capacity of the bound currently in force, or None when unbounded."""
     guard = llm_invoke._INFLIGHT
