@@ -24,6 +24,7 @@ build artifact — see `pyproject.toml`, `frontend/package.json`, and the
 | --- | --- | --- | --- |
 | Alembic | >=1.19.1 | MIT | https://github.com/sqlalchemy/alembic |
 | apache-ossie-nvidia-auto-ontology | git (`converters/nvidia`) | Apache-2.0 | https://github.com/apache/ossie |
+| azure-identity (optional `fabric` extra) | >=1.27.0 | MIT | https://github.com/Azure/azure-sdk-for-python |
 | cryptography | >=50.0.1 | Apache-2.0 OR BSD-3-Clause | https://github.com/pyca/cryptography |
 | databricks-sql-connector (`databricks-sql-connector[pyarrow]`) | >=4.4.0 | Apache-2.0 | https://github.com/databricks/databricks-sql-python |
 | DuckDB | >=1.5.5 | MIT | https://github.com/duckdb/duckdb-python |
@@ -48,6 +49,7 @@ build artifact — see `pyproject.toml`, `frontend/package.json`, and the
 | pyheavydb | >=8.0.1.post1 | Apache-2.0 | https://github.com/heavyai/pyheavydb |
 | PyHive (`pyhive[hive-pure-sasl]`) | >=0.7.0 | Apache-2.0 | https://github.com/dropbox/PyHive |
 | pyjks | >=20.0.0 | MIT | https://github.com/kurtbrose/pyjks |
+| pyodbc (optional `fabric` extra) | >=5.3.0 | MIT | https://github.com/mkleehammer/pyodbc |
 | python-dotenv | >=1.2.3 | BSD-3-Clause | https://github.com/theskumar/python-dotenv |
 | python-multipart | >=0.0.32 | Apache-2.0 | https://github.com/Kludex/python-multipart |
 | PyYAML | >=6.0.3 | MIT | https://github.com/yaml/pyyaml |
@@ -82,6 +84,13 @@ licenses such as Apache-2.0. It is used unmodified.
 `kumo-relational-engine` 1.0.0, all Apache-2.0. `kumo-relational-engine`
 bundles Mermaid (MIT); its license text ships in the wheel as
 `kumo_relational_engine/rfm/assets/MERMAID_LICENSE`.
+
+The optional `fabric` extra (`uv sync --extra fabric`, or the backend image
+built with `--build-arg WITH_FABRIC=true`) installs `pyodbc` and
+`azure-identity`; the latter pulls in `azure-core`, `msal` and
+`msal-extensions`, all MIT. The extra is not installed by default. The ODBC
+driver it loads, Microsoft's `msodbcsql18`, is a system package, not a Python
+dependency — see `CONTAINER_THIRD_PARTY_NOTICES.md`.
 
 ### Backend development dependencies (not redistributed)
 

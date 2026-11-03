@@ -13,12 +13,21 @@
 #
 #   docker run --rm -p 3001:3001 --env-file .env auto-ontology:latest
 #
+# Microsoft Fabric connector (off by default):
+#
+#   docker build --build-arg WITH_FABRIC=true -t auto-ontology:latest .
+#
+# installs the `fabric` Python extra and Microsoft's msodbcsql18 driver from
+# packages.microsoft.com, accepting its EULA (ACCEPT_EULA=Y). msodbcsql18 is
+# not open source; see CONTAINER_THIRD_PARTY_NOTICES.md.
+#
 # ---------------------------------------------------------------------------
 
 ARG PYTHON_VERSION=3.12
 ARG UV_VERSION=0.11.29
 ARG BASE_IMG=nvcr.io/nvidia/base/ubuntu
 ARG BASE_IMG_TAG=jammy-20250619
+ARG WITH_FABRIC=false
 
 ############################
 # Stage 1: builder
@@ -26,6 +35,7 @@ ARG BASE_IMG_TAG=jammy-20250619
 FROM $BASE_IMG:$BASE_IMG_TAG AS builder
 
 ARG UV_VERSION
+ARG WITH_FABRIC
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -58,7 +68,8 @@ COPY vendor/ vendor/
 
 # Resolve and install the dependency closure into /opt/venv.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --no-dev --no-install-project
+    if [ "$WITH_FABRIC" = "true" ]; then extras="--extra fabric"; else extras=""; fi \
+ && uv sync --no-dev --no-install-project $extras
 
 ############################
 # Stage 2: runtime
@@ -81,6 +92,21 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --system --gid 1000 auto_ontology \
  && useradd  --system --uid 1000 --gid auto_ontology --home /app --shell /usr/sbin/nologin auto_ontology
+
+ARG WITH_FABRIC
+RUN if [ "$WITH_FABRIC" = "true" ]; then \
+        apt-get update \
+     && apt-get install -y --no-install-recommends curl \
+     && . /etc/os-release \
+     && curl -fsSL -o /tmp/packages-microsoft-prod.deb \
+            "https://packages.microsoft.com/config/ubuntu/${VERSION_ID}/packages-microsoft-prod.deb" \
+     && dpkg -i /tmp/packages-microsoft-prod.deb \
+     && rm /tmp/packages-microsoft-prod.deb \
+     && apt-get update \
+     && ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql18 \
+     && apt-get purge -y --auto-remove curl \
+     && rm -rf /var/lib/apt/lists/*; \
+    fi
 
 WORKDIR /app
 

@@ -57,6 +57,9 @@ _CONNECTIVITY_MARKERS = (
     "socket timed out",
     "name or service not known",
     "temporary failure in name resolution",
+    # Microsoft ODBC drivers (Fabric, SQL Server).
+    "communication link failure",
+    "login timeout expired",
 )
 
 

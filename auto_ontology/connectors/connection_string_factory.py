@@ -21,6 +21,7 @@ DEFAULT_HEAVYDB_PORT = "6274"
 DEFAULT_KYUUBI_PORT = "10000"
 DEFAULT_TRINO_PORT = "8080"
 DEFAULT_CLICKHOUSE_PORT = "8123"
+DEFAULT_FABRIC_PORT = "1433"
 DEFAULT_HEAVYDB_PROTOCOL = "binary"
 
 
@@ -239,6 +240,38 @@ def build_connection_string(connection: Mapping[str, Any]) -> str:
             params.append(f"http_scheme={_enc(http_scheme)}")
 
         url = f"clickhouse://{credentials}{host}:{port}/{_enc(database)}"
+        if params:
+            url += f"?{'&'.join(params)}"
+        return url
+
+    if conn_type == "fabric":
+        # The portal's "SQL connection string" is a bare host, but a pasted
+        # ``tcp:host,1433`` or URL is common enough to accept.
+        host = _require(connection, "host").rstrip("/")
+        if host.startswith(("https://", "http://")):
+            host = host.split("://", 1)[1]
+        host = host.removeprefix("tcp:").split(",", 1)[0]
+        client_id = _require(connection, "user")
+        secret = _require(connection, "password")
+        database = _require(connection, "database")
+        port = str(connection.get("port") or "").strip() or DEFAULT_FABRIC_PORT
+
+        params = []
+        tenant_id = str(connection.get("tenant_id") or "").strip()
+        # A real bool from the form; string forms from a hand-edited connection.
+        token_auth = connection.get("token_auth")
+        if not isinstance(token_auth, bool):
+            token_auth = str(token_auth or "").strip().lower() in ("1", "true", "yes")
+        if token_auth:
+            if not tenant_id:
+                raise ValueError("Connection is missing required field: 'tenant_id'")
+            params.append("auth=token")
+        if tenant_id:
+            params.append(f"tenant_id={_enc(tenant_id)}")
+
+        url = (
+            f"fabric://{_enc(client_id)}:{_enc(secret)}@{host}:{port}/{_enc(database)}"
+        )
         if params:
             url += f"?{'&'.join(params)}"
         return url

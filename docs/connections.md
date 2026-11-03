@@ -51,11 +51,72 @@ The URL scheme selects the connector:
 | Trino         | `trino://`                  | yes           |
 | Apache Kyuubi | `kyuubi://`                 | yes           |
 | HeavyDB       | `heavydb://`                | yes           |
+| Microsoft Fabric | `fabric://`              | yes           |
 | DuckDB        | `duckdb://`                 | no            |
 | SQLite        | `sqlite://`                 | no            |
 
 The registry lives in
 [`auto_ontology/connectors/registry.py`](../auto_ontology/connectors/registry.py).
+
+## Microsoft Fabric
+
+The `fabric` connector reads a Fabric **Warehouse** or the read-only **SQL
+analytics endpoint** of a **Lakehouse**, one warehouse or lakehouse per
+connection. It only runs `SELECT` / `WITH` queries.
+
+### Install
+
+The connector is optional and needs two things the default install does not
+include:
+
+- the `fabric` Python extra (`pyodbc`, `azure-identity`): `uv sync --extra fabric`;
+- Microsoft's **ODBC Driver 18 for SQL Server**, a system package
+  (`msodbcsql18`, from Microsoft's apt/yum repository, installed with
+  `ACCEPT_EULA=Y`). The driver is proprietary; see Microsoft's
+  [install guide](https://learn.microsoft.com/sql/connect/odbc/linux-mac/installing-the-microsoft-odbc-driver-for-sql-server).
+
+The backend image installs both only when built with
+`docker build --build-arg WITH_FABRIC=true .`; by default it contains neither.
+
+### Connection string
+
+Use the host from the warehouse's or lakehouse's *SQL connection string*
+setting:
+
+```text
+fabric://<client_id>:<client_secret>@<workspace>.datawarehouse.fabric.microsoft.com[:1433]/<warehouse_or_lakehouse>[?tenant_id=<tenant_id>&auth=token]
+```
+
+URL-encode the client secret. The connection always uses TLS
+(`Encrypt=yes`) on port 1433 unless another port is given. Optional query
+parameters: `driver` (ODBC driver name, default `ODBC Driver 18 for SQL
+Server`) and `login_timeout` (seconds). In the UI, pick **Microsoft Fabric**
+and fill in the same fields; a schema can be named or picked from a list.
+
+### Authentication
+
+Fabric accepts Microsoft Entra ID identities only, never SQL logins. Both
+modes use a service principal (client ID and secret):
+
+- **Driver sign-in** (default, `auth=service_principal`): the ODBC driver signs
+  in itself with `Authentication=ActiveDirectoryServicePrincipal`. `tenant_id`
+  is not needed.
+- **In-process token** (`auth=token`; the *Fetch Entra Token in Process* box in
+  the UI): the connector obtains the access token through `azure-identity` and
+  hands it to the driver. Requires `tenant_id`.
+
+### Permissions
+
+The service principal needs:
+
+- the **Viewer** role (or higher) on the Fabric workspace, or the warehouse or
+  lakehouse shared with it directly; and
+- **read access through the SQL endpoint** (`ReadData`, "Read all data using
+  SQL"), which the Viewer role includes, plus `SELECT` on any objects
+  restricted by T-SQL permissions.
+
+A Fabric administrator must also allow service principals to use Fabric APIs
+in the tenant settings. Write access is never needed.
 
 ## Vault
 

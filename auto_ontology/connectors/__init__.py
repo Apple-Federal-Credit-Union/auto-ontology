@@ -8,6 +8,7 @@ from auto_ontology.connectors.base import SQLDatabase
 from auto_ontology.connectors.clickhouse import ClickHouseDatabase
 from auto_ontology.connectors.databricks import DatabricksDatabase
 from auto_ontology.connectors.duckdb import DuckDBDatabase
+from auto_ontology.connectors.fabric import FabricDatabase
 from auto_ontology.connectors.heavydb import HeavyDBDatabase
 from auto_ontology.connectors.kyuubi import KyuubiDatabase
 from auto_ontology.connectors.mysql import MySQLDatabase
@@ -25,6 +26,7 @@ __all__ = [
     "ClickHouseDatabase",
     "DatabricksDatabase",
     "DuckDBDatabase",
+    "FabricDatabase",
     "HeavyDBDatabase",
     "KyuubiDatabase",
     "MySQLDatabase",

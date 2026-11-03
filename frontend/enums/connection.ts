@@ -12,6 +12,7 @@ export enum ConnectionType {
 	KYUUBI = 'kyuubi',
 	TRINO = 'trino',
 	CLICKHOUSE = 'clickhouse',
+	FABRIC = 'fabric',
 }
 
 export const connectionDisplayName: Record<ConnectionType, string> = {
@@ -23,6 +24,7 @@ export const connectionDisplayName: Record<ConnectionType, string> = {
 	[ConnectionType.KYUUBI]: 'Apache Kyuubi',
 	[ConnectionType.TRINO]: 'Trino',
 	[ConnectionType.CLICKHOUSE]: 'ClickHouse',
+	[ConnectionType.FABRIC]: 'Microsoft Fabric',
 };
 
 export const isConnectionType = (value: string | null | undefined): value is ConnectionType =>
@@ -47,6 +49,8 @@ export type ConnectionFieldKey =
 	| 'schema'
 	| 'http_scheme'
 	| 'sso_federation'
+	| 'tenant_id'
+	| 'token_auth'
 	| 'table_allow_regex'
 	| 'table_deny_regex';
 
@@ -263,12 +267,51 @@ export const CONNECTION_FIELDS: Record<ConnectionType, ConnectionField[]> = {
 			hint: 'Leave empty to infer from the port: https on 443 and 8443, http otherwise. Set https explicitly for a TLS listener on any other port — unlike Trino, a password alone does not imply TLS here.',
 		},
 	],
+	[ConnectionType.FABRIC]: [
+		{
+			key: 'host',
+			label: 'SQL Endpoint',
+			placeholder: '<workspace>.datawarehouse.fabric.microsoft.com',
+			hint: 'The SQL connection string from the warehouse or lakehouse settings. Connects on port 1433 with TLS.',
+		},
+		{
+			key: 'user',
+			label: 'Client ID',
+			hint: 'The application (client) ID of an Entra ID service principal with the Viewer role on the workspace.',
+		},
+		{ key: 'password', label: 'Client Secret', secret: true },
+		{
+			key: 'database',
+			label: 'Warehouse or Lakehouse',
+			placeholder: 'sales_warehouse',
+		},
+		{
+			key: 'tenant_id',
+			label: 'Tenant ID',
+			optional: true,
+			hint: 'The Entra ID directory (tenant) ID. Required only when fetching the token in process.',
+		},
+		{
+			key: 'token_auth',
+			label: 'Fetch Entra Token in Process',
+			optional: true,
+			boolean: true,
+			hint: 'Acquire the access token with azure-identity and pass it to the driver, instead of letting the ODBC driver sign in as the service principal.',
+		},
+		{
+			key: 'schema',
+			label: 'Schema',
+			placeholder: 'Leave Empty to Choose from a List',
+			hint: 'Ingest only this schema. Leave empty to pick schemas from a list instead.',
+			optional: true,
+		},
+	],
 };
 
 /**
  * Fields offered for every connector, appended after the type-specific ones.
  *
- * Kept separate rather than copied into all eight lists: they are enforced
+ * Kept separate rather than copied into every list: they are enforced
  * centrally at catalog extraction (`auto_ontology/catalog/table_filter.py`), so
  * every connector honours them identically and none may drift.
  */

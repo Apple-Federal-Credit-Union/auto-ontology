@@ -67,6 +67,10 @@ dependencies = [
 
 [project.optional-dependencies]
 kumo = ["kumo-relational-client[relational]>=1.0.0,<2"]
+fabric = [
+    "azure-identity>=1.27.0",
+    "pyodbc>=5.3.0",
+]
 
 [build-system]
 requires = ["hatchling"]

@@ -45,6 +45,22 @@ Source code for the base container is provided by NVIDIA with that image.
 | `libpq5` (Ubuntu package) | jammy | PostgreSQL License | https://www.postgresql.org |
 | `tini` (Ubuntu package) | jammy | MIT | https://github.com/krallin/tini |
 
+#### Optional: `--build-arg WITH_FABRIC=true`
+
+Off by default; the default image contains none of these. When enabled, the
+build adds Microsoft's apt repository and installs the ODBC driver used by the
+Microsoft Fabric connector, accepting Microsoft's EULA (`ACCEPT_EULA=Y`).
+`msodbcsql18` is **proprietary, not open source**: whoever builds and
+distributes such an image is responsible for complying with its license terms.
+
+| Component | Version | License | Project URL |
+| --- | --- | --- | --- |
+| `msodbcsql18` (Microsoft ODBC Driver 18 for SQL Server, packages.microsoft.com) | 18.x | Microsoft Software License Terms (proprietary) | https://learn.microsoft.com/sql/connect/odbc/linux-mac/installing-the-microsoft-odbc-driver-for-sql-server |
+| `packages-microsoft-prod` (Microsoft apt repository configuration and signing key) | — | Microsoft | https://packages.microsoft.com |
+| `unixodbc`, `odbcinst`, `libodbc2`, `libodbcinst2`, `unixodbc-common` (Ubuntu packages) | jammy | LGPL-2.1-or-later (libraries), GPL-2.0-or-later (tools) | https://packages.ubuntu.com/jammy/unixodbc |
+| `libkrb5-3`, `libgssapi-krb5-2` (Ubuntu packages) | jammy | MIT | https://packages.ubuntu.com/jammy/libkrb5-3 |
+| `openssl` (Ubuntu package) | jammy | Apache-2.0 | https://packages.ubuntu.com/jammy/openssl |
+
 ### `auto-ontology-frontend` — `frontend/Dockerfile`
 
 | Component | Version | License | Project URL |
