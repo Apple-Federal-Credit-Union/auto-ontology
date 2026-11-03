@@ -262,6 +262,22 @@ def _sqlstate(error: BaseException) -> str | None:
     return args[0] if args and isinstance(args[0], str) else None
 
 
+# ODBC's mapping of SQL Server's "Invalid object name" (error 208). It is the
+# one signal that distinguishes "this Fabric item genuinely has none of the
+# catalog view this read depends on" -- a Lakehouse SQL endpoint has no
+# sys.key_constraints-backed PK/FK metadata, or Query Insights is disabled on
+# this capacity -- from every other way a metadata read can fail. Those other
+# ways (a dropped connection, a login timeout, a permissions denial) say
+# nothing about whether the feature exists, so they must not be read as "this
+# item doesn't support it" and swallowed into a false-empty frame.
+_UNSUPPORTED_FEATURE_SQLSTATE = "42S02"
+
+
+def _is_unsupported_feature(error: BaseException) -> bool:
+    """Whether *error* says the catalog view/table a metadata read needs is absent."""
+    return _sqlstate(error) == _UNSUPPORTED_FEATURE_SQLSTATE
+
+
 def prepare_read_only(sql: str, dialect: str = _DIALECT) -> str:
     """Return the text to send for *sql*, refusing anything but one read query.
 
@@ -292,7 +308,22 @@ def prepare_read_only(sql: str, dialect: str = _DIALECT) -> str:
             "Fabric connector is read-only: only SELECT and WITH queries are "
             f"allowed, not {tree.key.upper()}"
         )
-    if tree.find(exp.Limit) is not None:
+    limit = tree.find(exp.Limit)
+    if limit is not None:
+        # Rendering for a dialect without LIMIT (T-SQL/Fabric) moves it to a
+        # leading ``TOP``, which only reorders the generated SQL's ``?``
+        # placeholders relative to one another if the LIMIT's own value is one
+        # -- a literal LIMIT carries no placeholder to move, so every other
+        # placeholder keeps its original position either way. ``execute()``
+        # passes the caller's parameter list positionally against whatever SQL
+        # is actually sent, so a parameterized LIMIT would silently bind values
+        # to the wrong placeholders instead of just failing loudly.
+        if not isinstance(limit.expression, exp.Literal):
+            raise ReadOnlyViolation(
+                "Fabric connector cannot rewrite a parameterized LIMIT to TOP "
+                "without reordering positional '?' parameters; use a literal "
+                "LIMIT (e.g. 'LIMIT 100') instead of a bound one"
+            )
         return tree.sql(dialect=dialect)
     return sql
 
@@ -518,20 +549,29 @@ class FabricDatabase(SQLDatabase):
     ) -> pd.DataFrame:
         """Run a metadata read that some Fabric items do not support.
 
-        A Lakehouse SQL endpoint, for one, may refuse a catalog view a Warehouse
-        serves. That is not an ingestion failure -- the item simply has none of
-        *what* -- so it yields an empty, correctly shaped frame.
+        A Lakehouse SQL endpoint, for one, may lack a catalog view a Warehouse
+        serves -- reported as SQLSTATE 42S02, "Invalid object name". That is
+        not an ingestion failure -- the item simply has none of *what* -- so it
+        yields an empty, correctly shaped frame.
+
+        Anything else -- the login timed out, the connection dropped and the
+        reconnect-and-retry in :meth:`execute` still failed, a permissions
+        denial -- is not this connector's to swallow. It is re-raised with its
+        message and SQLSTATE intact, the same as every other read, so
+        :mod:`auto_ontology.connectors.db_errors` can classify it upstream
+        instead of ingestion silently reporting an empty catalog.
         """
         pyodbc = _import_pyodbc()
         try:
             frame = self.execute(sql)
-        except pyodbc.Error:
+        except pyodbc.Error as exc:
+            if not _is_unsupported_feature(exc):
+                raise
             logger.log(
                 level,
                 "Fabric database %s does not expose %s; returning none",
                 self._database_name,
                 what,
-                exc_info=level <= logging.DEBUG,
             )
             return pd.DataFrame(columns=columns)
         if "table_schema" not in columns:

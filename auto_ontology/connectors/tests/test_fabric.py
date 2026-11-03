@@ -247,6 +247,44 @@ def test_build_connection_string_strips_a_pasted_url() -> None:
     assert url == f"fabric://c:s@{HOST}:1433/db"
 
 
+def test_build_connection_string_strips_a_pasted_url_with_port() -> None:
+    """A pasted endpoint with an embedded port must not double up with ours.
+
+    ``https://<host>:1433/`` -- the literal shape in the portal's SQL
+    connection string -- previously left the port glued to the host, so
+    appending the default produced an unparseable ``host:1433:1433``.
+    """
+    url = build_connection_string(
+        {
+            "type": "fabric",
+            "host": f"https://{HOST}:1433/",
+            "user": "c",
+            "password": "s",
+            "database": "db",
+        }
+    )
+
+    assert url == f"fabric://c:s@{HOST}:1433/db"
+    settings = _parse_connection_string(url)
+    assert settings["host"] == HOST
+    assert settings["port"] == 1433
+
+
+def test_build_connection_string_strips_a_pasted_url_with_port_and_path() -> None:
+    """A non-default embedded port is kept, and a trailing path is dropped."""
+    url = build_connection_string(
+        {
+            "type": "fabric",
+            "host": f"https://{HOST}:1444/some/path",
+            "user": "c",
+            "password": "s",
+            "database": "db",
+        }
+    )
+
+    assert url == f"fabric://c:s@{HOST}:1444/db"
+
+
 @pytest.mark.parametrize("flag", [True, "true"])
 def test_build_connection_string_token_auth(flag: object) -> None:
     url = build_connection_string(
@@ -495,6 +533,27 @@ def test_limit_rewrite_keeps_placeholders() -> None:
     )
 
 
+def test_parameterized_limit_is_refused_rather_than_misbound(
+    driver: FakeDriver,
+) -> None:
+    """A ``?`` LIMIT would move ahead of other placeholders once rewritten to TOP.
+
+    ``execute()`` passes the caller's parameter list positionally against
+    whatever SQL is actually sent, so silently rewriting ``... WHERE b = ?
+    LIMIT ?`` to ``SELECT TOP (?) ... WHERE b = ?`` would bind the LIMIT value
+    to ``b`` and vice versa. Refusing it outright is safer than running a
+    statement with swapped parameters.
+    """
+    with pytest.raises(ReadOnlyViolation, match="parameterized LIMIT"):
+        prepare_read_only("SELECT a FROM t WHERE b = ? LIMIT ?")
+
+    with pytest.raises(ReadOnlyViolation, match="parameterized LIMIT"):
+        FabricDatabase(URL).execute(
+            "SELECT a FROM t WHERE b = ? LIMIT ?", parameters=["x", 10]
+        )
+    assert driver.executed == []
+
+
 # ----------------------------------------------------------------------
 # Metadata
 # ----------------------------------------------------------------------
@@ -655,6 +714,53 @@ def test_pks_and_fks_are_empty_frames_where_unsupported(
         "ordinal_position",
     ]
     assert fks.empty and len(fks.columns) == 6
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        FakeError("08S01", "[Microsoft][ODBC Driver 18]Communication link failure"),
+        FakeError("HYT00", "[Microsoft] Login timeout expired"),
+    ],
+    ids=["transport-failure", "login-timeout"],
+)
+def test_pks_and_fks_raise_on_transport_failures(
+    driver: FakeDriver, error: FakeError
+) -> None:
+    """A transport failure or login timeout is not "unsupported"; it must raise.
+
+    Swallowing it into an empty frame would make ingestion report a catalog
+    with no keys instead of surfacing that the endpoint could not be reached.
+    """
+    driver.respond = _answer({"sys.key_constraints": error, "sys.foreign_keys": error})
+    database = FabricDatabase(URL)
+
+    with pytest.raises(FakeError):
+        database.get_pks()
+    with pytest.raises(FakeError):
+        database.get_fks()
+
+
+def test_pks_raises_when_the_reconnect_retry_still_fails(driver: FakeDriver) -> None:
+    """A dropped connection that still fails after :meth:`execute`'s one retry.
+
+    ``_optional_read`` must not add a second layer of swallowing on top of
+    ``execute``'s own reconnect-and-retry; once that has already given up, the
+    error is exactly as real as any other read's.
+    """
+
+    def respond(sql: str) -> Result:
+        if "sys.key_constraints" in sql:
+            raise FakeError("08S01", "Communication link failure")
+        raise AssertionError(f"unexpected statement: {sql}")
+
+    driver.respond = respond
+    database = FabricDatabase(URL)
+
+    with pytest.raises(FakeError, match="Communication link failure"):
+        database.get_pks()
+    # Reconnected once (per execute()'s own retry) and gave up, not swallowed.
+    assert len(driver.connects) == 2
 
 
 def test_get_queries_reads_query_insights(driver: FakeDriver) -> None:

@@ -40,6 +40,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # Off by default; set WITH_FABRIC=true in .env to install pyodbc,
+      # azure-identity, and the msodbcsql18 driver for the Fabric connector.
+      args:
+        WITH_FABRIC: ${WITH_FABRIC:-false}
     image: auto-ontology:latest
     container_name: auto-ontology
     restart: unless-stopped
@@ -68,6 +72,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        WITH_FABRIC: ${WITH_FABRIC:-false}
     image: auto-ontology:latest
     container_name: auto-ontology-ingestion-service
     restart: unless-stopped
@@ -109,6 +115,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # Shares the auto-ontology:latest tag with the services above; built
+      # with a different WITH_FABRIC, the last one built would silently win.
+      args:
+        WITH_FABRIC: ${WITH_FABRIC:-false}
     image: auto-ontology:latest
     container_name: auto-ontology-migrate
     env_file:

@@ -246,15 +246,35 @@ def build_connection_string(connection: Mapping[str, Any]) -> str:
 
     if conn_type == "fabric":
         # The portal's "SQL connection string" is a bare host, but a pasted
-        # ``tcp:host,1433`` or URL is common enough to accept.
+        # ``tcp:host,1433`` or a full URL -- scheme, path, and port all
+        # included -- is common enough to accept.
         host = _require(connection, "host").rstrip("/")
         if host.startswith(("https://", "http://")):
             host = host.split("://", 1)[1]
         host = host.removeprefix("tcp:").split(",", 1)[0]
+        # Drop a pasted URL's path before looking for a colon-form port, so a
+        # path never gets mistaken for one (and a colon inside it never gets
+        # mistaken for a host).
+        host = host.split("/", 1)[0]
+        # A colon-form port (``host:1433``, from a pasted URL) has to be pulled
+        # out rather than left in place: appending the port below would
+        # otherwise double it up as ``host:1433:1433``, which does not parse.
+        port_from_host = ""
+        if host.count(":") == 1:
+            host, _, candidate = host.partition(":")
+            if candidate.isdigit():
+                port_from_host = candidate
+            else:
+                # Not a port after all; put it back rather than losing it.
+                host = f"{host}:{candidate}"
         client_id = _require(connection, "user")
         secret = _require(connection, "password")
         database = _require(connection, "database")
-        port = str(connection.get("port") or "").strip() or DEFAULT_FABRIC_PORT
+        port = (
+            str(connection.get("port") or "").strip()
+            or port_from_host
+            or DEFAULT_FABRIC_PORT
+        )
 
         params = []
         tenant_id = str(connection.get("tenant_id") or "").strip()

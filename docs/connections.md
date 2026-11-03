@@ -75,8 +75,12 @@ include:
   `ACCEPT_EULA=Y`). The driver is proprietary; see Microsoft's
   [install guide](https://learn.microsoft.com/sql/connect/odbc/linux-mac/installing-the-microsoft-odbc-driver-for-sql-server).
 
-The backend image installs both only when built with
-`docker build --build-arg WITH_FABRIC=true .`; by default it contains neither.
+The backend image installs both only when built with the `WITH_FABRIC=true`
+build arg; by default it contains neither. With a plain `docker build`, pass
+it directly: `docker build --build-arg WITH_FABRIC=true .`. With Docker
+Compose, set `WITH_FABRIC=true` in `.env` before `docker compose up -d
+--build` — `docker-compose.yml` forwards it as a build arg to every service
+that builds the backend image.
 
 ### Connection string
 
