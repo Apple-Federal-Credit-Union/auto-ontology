@@ -23,6 +23,7 @@ from openai import AuthenticationError, OpenAI, RateLimitError
 
 from auto_ontology.utils import embedding
 from auto_ontology.utils.embedding import (
+    EMBED_DIMENSIONS_DEFAULT,
     EmbedParams,
     _embed_frame,
     _is_fatal,
@@ -45,15 +46,25 @@ def _params(**overrides: Any) -> EmbedParams:
     return EmbedParams(**fields)
 
 
-def _vector(text: str) -> list[float]:
-    """A distinct, recognisable vector per input text."""
-    return [float(len(text)), float(ord(text[0]))]
+def _vector(text: str, dimensions: int = EMBED_DIMENSIONS_DEFAULT) -> list[float]:
+    """A distinct, recognisable vector per input text, padded to *dimensions*.
+
+    Real endpoints return a fixed-width vector; padding here (rather than the
+    two bare floats this used to return) lets the fake endpoint satisfy
+    ``embed_texts``'s own width check instead of tripping it on every test.
+    """
+    vector = [0.0] * dimensions
+    vector[0] = float(len(text))
+    if dimensions > 1:
+        vector[1] = float(ord(text[0]))
+    return vector
 
 
 def _ok(request: httpx.Request, *, reverse: bool = False) -> httpx.Response:
     body = json.loads(request.content)
+    dimensions = body.get("dimensions", EMBED_DIMENSIONS_DEFAULT)
     data = [
-        {"object": "embedding", "index": i, "embedding": _vector(text)}
+        {"object": "embedding", "index": i, "embedding": _vector(text, dimensions)}
         for i, text in enumerate(body["input"])
     ]
     if reverse:
@@ -279,6 +290,62 @@ def test_a_bad_key_fails_at_once(endpoint) -> None:
     with pytest.raises(AuthenticationError):
         embed_texts(["a"], _params(), "passage")
     assert len(seen) == 1
+
+
+# ---------------------------------------------------------------------------
+# Dimensions (EMBED_DIMENSIONS)
+# ---------------------------------------------------------------------------
+
+
+def test_unset_dimensions_sends_no_dimensions_kwarg(endpoint) -> None:
+    seen = endpoint(_ok)
+    embed_texts(["a"], _params(), "passage")
+    assert "dimensions" not in json.loads(seen[0].content)
+
+
+def test_set_dimensions_sends_the_kwarg_and_is_honoured(endpoint) -> None:
+    seen = endpoint(_ok)
+    vectors = embed_texts(["a"], _params(dimensions=1024), "passage")
+    assert json.loads(seen[0].content)["dimensions"] == 1024
+    assert vectors == [_vector("a", 1024)]
+
+
+def test_a_vector_of_the_wrong_width_raises_naming_embed_dimensions(
+    endpoint,
+) -> None:
+    """The endpoint claiming a width it didn't honour must fail loudly.
+
+    A silent mismatch would write a vector of the wrong width into a pgvector
+    column typed for another one.
+    """
+
+    def _wrong_width(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        data = [
+            {"object": "embedding", "index": i, "embedding": [0.1, 0.2, 0.3]}
+            for i, _ in enumerate(body["input"])
+        ]
+        return httpx.Response(200, json={"object": "list", "data": data, "model": "m"})
+
+    endpoint(_wrong_width)
+    with pytest.raises(RuntimeError, match="EMBED_DIMENSIONS"):
+        embed_texts(["a"], _params(dimensions=1024), "passage")
+
+
+def test_an_unset_mismatch_also_names_embed_dimensions(endpoint) -> None:
+    """Unset still implies a width (EMBED_DIMENSIONS_DEFAULT), so it is checked too."""
+
+    def _short_vector(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        data = [
+            {"object": "embedding", "index": i, "embedding": [0.1, 0.2]}
+            for i, _ in enumerate(body["input"])
+        ]
+        return httpx.Response(200, json={"object": "list", "data": data, "model": "m"})
+
+    endpoint(_short_vector)
+    with pytest.raises(RuntimeError, match="EMBED_DIMENSIONS"):
+        embed_texts(["a"], _params(), "passage")
 
 
 # ---------------------------------------------------------------------------

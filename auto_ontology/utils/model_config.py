@@ -98,3 +98,25 @@ def resolve(prefix: str, field: str) -> str:
     """
     key = f"{prefix}_{field}"
     return os.environ.get(key, "") or _default(field) or _builtin_default(prefix, key)
+
+
+# Vector width used when ``EMBED_DIMENSIONS`` is unset — the native size of the
+# built-in default embedding models above, and what every existing pgvector
+# collection was created with.
+EMBED_DIMENSIONS_DEFAULT = 2048
+
+
+def embed_dimensions() -> int | None:
+    """Resolved ``EMBED_DIMENSIONS``, or ``None`` when unset.
+
+    Resolved like any other ``EMBED_*`` field (env var, no built-in default
+    here — there is no sane one for an arbitrary model), but kept ``None``
+    rather than defaulted so callers can tell "unset" from "explicitly 2048"
+    apart: :func:`auto_ontology.utils.embedding.embed_texts` only sends the
+    ``dimensions`` request field when this is not ``None``, since an endpoint
+    that doesn't support it may reject the field outright. Callers that need
+    a concrete width (e.g. the pgvector column type) fall back to
+    :data:`EMBED_DIMENSIONS_DEFAULT` themselves.
+    """
+    raw = resolve("EMBED", "DIMENSIONS")
+    return int(raw) if raw else None

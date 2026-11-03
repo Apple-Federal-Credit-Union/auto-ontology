@@ -411,6 +411,20 @@ that support structured output, and keep the embedding model the same for
 ingestion and queries. [`.env.example`](./.env.example) documents every
 variable.
 
+#### Embedding dimension
+
+The pgvector column behind the data and semantic layers has a fixed vector
+width, set by `EMBED_DIMENSIONS`. It defaults to 2048, the native size of the
+default embedding model. Left unset, Auto-Ontology sends no `dimensions` field
+to the endpoint, so existing NIM deployments that don't expect one keep
+working unchanged. Set it for an embedding model whose native size isn't 2048:
+a Matryoshka-capable model such as Qwen3-Embedding-8B (native 4096, usable at
+smaller sizes through `dimensions`), or a 1024-, 1536-, or 3072-wide
+OpenAI-compatible model. The store uses pgvector's `halfvec` type, whose HNSW
+index caps out at 4000 dimensions, so `EMBED_DIMENSIONS` can't go above that.
+Changing it after ingestion requires re-ingesting, because a collection's
+vector column keeps its original width.
+
 ### Predictions
 
 Set `KUMO_RFM_API_KEY` and the agent routes predictive questions to KumoRFM.

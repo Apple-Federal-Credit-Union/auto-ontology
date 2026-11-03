@@ -286,20 +286,24 @@ class PostgresVDB:
 
         **The column has to become ``halfvec`` for the index to be reachable**,
         which is not obvious and is worth the ALTER. pgvector caps HNSW at 2000
-        dimensions for ``vector`` and the embedding model emits 2048, so the
-        only index that can be built over a ``vector(2048)`` column is one over
-        a cast expression -- and an expression index is matched *syntactically*,
-        so it serves ``embedding::halfvec(2048) <=> $1`` and not the plain
-        ``embedding <=> $1`` that ``PGVectorStore`` generates. Postgres then
-        silently plans a sequential scan and nothing reports it. Typing the
-        column ``halfvec`` instead lets a plain index serve the query the store
-        actually writes: the *parameter* is cast (``embedding <=> ($1)::halfvec``),
-        which costs nothing, rather than the indexed column.
+        dimensions for ``vector``, and at the default ``vector_size`` of 2048
+        (or any ``EMBED_DIMENSIONS`` above 2000) the only index that can be
+        built over a plain ``vector`` column is one over a cast expression --
+        and an expression index is matched *syntactically*, so it serves
+        ``embedding::halfvec(n) <=> $1`` and not the plain ``embedding <=> $1``
+        that ``PGVectorStore`` generates. Postgres then silently plans a
+        sequential scan and nothing reports it. Typing the column ``halfvec``
+        instead lets a plain index serve the query the store actually writes:
+        the *parameter* is cast (``embedding <=> ($1)::halfvec``), which costs
+        nothing, rather than the indexed column.
+
+        ``halfvec`` itself caps HNSW at 4000 dimensions -- an ``EMBED_DIMENSIONS``
+        above that cannot be indexed this way at all.
 
         The tradeoff is that stored vectors are float16 rather than float32.
-        Cosine ranking over 2048 dimensions tolerates that -- it is the same
-        approximation the index itself would apply -- but it is a real precision
-        change, not just an index.
+        Cosine ranking tolerates that at the dimensions in practical use here
+        -- it is the same approximation the index itself would apply -- but it
+        is a real precision change, not just an index.
 
         Best-effort: a failure here costs latency, not correctness, so it is
         logged and the store still works.

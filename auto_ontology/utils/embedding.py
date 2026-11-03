@@ -32,7 +32,11 @@ from typing import TYPE_CHECKING, Any, Callable, Iterator, Literal
 import httpx
 from openai import APIStatusError, Omit, OpenAI
 
-from auto_ontology.utils.model_config import resolve
+from auto_ontology.utils.model_config import (
+    EMBED_DIMENSIONS_DEFAULT,
+    embed_dimensions,
+    resolve,
+)
 from auto_ontology.vdb.records import write_embedded_rows
 
 if TYPE_CHECKING:
@@ -56,6 +60,8 @@ _TEXT_PREFIXED_MODELS = ("nemotron-3.5-embed-1b-nvfp4",)
 _EMBED_ENDPOINT = resolve("EMBED", "ENDPOINT")
 _EMBED_MODEL = resolve("EMBED", "MODEL")
 _EMBED_API_KEY = resolve("EMBED", "API_KEY")
+# None when unset -- see model_config.embed_dimensions for why that matters.
+_EMBED_DIMENSIONS = embed_dimensions()
 
 # Per-request retries inside the client, for 408/409/429/5xx and dropped
 # connections. They back off for seconds; the chunk-level retry below is the
@@ -96,6 +102,11 @@ class EmbedParams:
     inference_batch_size: int = 32
     nim_http_max_concurrent: int = 32
     request_timeout_s: float = 600.0
+    # None means "use the model's native width": no `dimensions` field is sent
+    # and returned vectors are expected to be EMBED_DIMENSIONS_DEFAULT wide.
+    # Set (via EMBED_DIMENSIONS) for a Matryoshka-capable model whose native
+    # size isn't 2048, or to shrink/grow an OpenAI-compatible model's output.
+    dimensions: int | None = None
 
 
 def get_embed_params() -> EmbedParams:
@@ -103,6 +114,7 @@ def get_embed_params() -> EmbedParams:
         embed_invoke_url=_EMBED_ENDPOINT,
         model_name=_EMBED_MODEL,
         api_key=_EMBED_API_KEY,
+        dimensions=_EMBED_DIMENSIONS,
     )
 
 
@@ -171,6 +183,16 @@ def embed_texts(
     *timeout* (seconds per request) and *retries* (per request) default to the
     ingest-sized ``params.request_timeout_s`` and ``_REQUEST_RETRIES``; a caller
     with its own retry loop passes ``retries=0`` so the two do not multiply.
+
+    When ``params.dimensions`` (``EMBED_DIMENSIONS``) is set, it is sent as
+    the request's ``dimensions`` field -- for a Matryoshka-capable model
+    whose native output isn't ``EMBED_DIMENSIONS_DEFAULT``. Left unset, no
+    such field is sent, since some endpoints reject one they don't support.
+    Either way, every returned vector is checked against the expected width
+    (``params.dimensions`` or ``EMBED_DIMENSIONS_DEFAULT``) and a mismatch
+    raises ``RuntimeError`` naming ``EMBED_DIMENSIONS`` -- the pgvector column
+    is typed to one fixed width, so a silently different one would corrupt
+    the store rather than fail loudly.
     """
     stripped = [text.strip() if isinstance(text, str) else "" for text in texts]
     to_send = [i for i, text in enumerate(stripped) if text]
@@ -183,12 +205,20 @@ def embed_texts(
         client = client.with_options(max_retries=retries)
     batches = list(itertools.batched(to_send, max(1, params.inference_batch_size)))
     prefix = _text_prefix(params.model_name, input_type)
+    # The width every returned vector must have. Not sending `dimensions` at
+    # all (params.dimensions is None) still implies a width -- the model's
+    # native one, which every existing pgvector collection assumes is
+    # EMBED_DIMENSIONS_DEFAULT -- so a mismatch is caught either way.
+    expected_dims = params.dimensions or EMBED_DIMENSIONS_DEFAULT
 
     def _embed_batch(indices: tuple[int, ...]) -> None:
         response = client.embeddings.create(
             model=params.model_name,
             input=[prefix + stripped[i] for i in indices],
             encoding_format="float",
+            # Omitted (not sent as null) when unset: some NIM endpoints reject
+            # an unrecognised `dimensions` field outright.
+            dimensions=params.dimensions if params.dimensions is not None else Omit(),
             extra_body={
                 "input_type": input_type,
                 "truncate": "END",
@@ -207,7 +237,16 @@ def embed_texts(
                 f"for {len(indices)} input(s)."
             )
         for item in response.data:
-            vectors[indices[item.index]] = list(item.embedding)
+            vector = list(item.embedding)
+            if len(vector) != expected_dims:
+                raise RuntimeError(
+                    f"Embedding endpoint for model {params.model_name!r} "
+                    f"returned a {len(vector)}-dimension vector; expected "
+                    f"{expected_dims}. Set EMBED_DIMENSIONS={len(vector)} if "
+                    "that is this model's actual output width (unset "
+                    f"defaults to {EMBED_DIMENSIONS_DEFAULT})."
+                )
+            vectors[indices[item.index]] = vector
 
     if len(batches) == 1:
         _embed_batch(batches[0])

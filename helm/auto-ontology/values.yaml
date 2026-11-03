@@ -57,6 +57,13 @@ kumoRfmApiUrl: ""
 # auto-derive from the API key prefix; set to override just the embedder.
 embedEndpoint: ""
 embedModel: ""
+# Output width of the embedding model, in floats. Leave empty to default to
+# 2048 and send no `dimensions` field to the endpoint. Set for a model whose
+# native size isn't 2048 (e.g. a Matryoshka-capable model used at a smaller
+# size). pgvector's HNSW index caps out at 4000 dimensions for the `halfvec`
+# column type this store uses. Changing this after ingestion requires
+# re-ingesting — a collection's vector column keeps its original width.
+embedDimensions: ""
 # Ingestion targets - comma-separated list of PG URLs the worker reads from.
 connectionStrings: ""
 # HashiCorp Vault (AppRole) credentials for pulling secrets at runtime.
