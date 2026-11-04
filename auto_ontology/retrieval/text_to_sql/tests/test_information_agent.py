@@ -152,9 +152,10 @@ def test_duplicate_tool_call_is_not_executed_twice(
     assert len(result["path_state"]["information_tool_calls"]) == 1
 
 
-def test_llm_failure_returns_safe_non_sql_response(
+def test_llm_failure_falls_back_to_calculation_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """An LLM failure is unanswered, so it reroutes to SQL rather than ending."""
     monkeypatch.setattr(
         information_agent,
         "invoke_with_structured_output",
@@ -163,11 +164,12 @@ def test_llm_failure_returns_safe_non_sql_response(
 
     result = InformationAgent().execute(_state())
 
-    response = result["path_state"]["final_response"]
-    assert "couldn't complete the metadata lookup safely" in response["response"]
-    assert "Revenue" in response["response"]
-    assert response["sql_code"] == ""
-    assert result["path_state"]["information_tool_calls"] == []
+    assert result["decision"] == "fallback"
+    path_state = result["path_state"]
+    assert path_state["question_type"] == "calculation"
+    assert path_state["information_fallback"] is True
+    assert path_state["information_tool_calls"] == []
+    assert "final_response" not in path_state
 
 
 def test_tool_failure_is_observed_and_answered_safely(
@@ -301,4 +303,84 @@ def test_reasoning_limit_stops_repeated_calls(
     result = InformationAgent().execute(_state())
 
     assert len(tool_calls) == 1
-    assert "reasoning limit" in result["path_state"]["final_response"]["response"]
+    # Reaching the agent's own iteration cap, not the explicit tool-call
+    # limit, still falls back to the SQL path like any other unanswered run.
+    assert result["decision"] == "fallback"
+    assert result["path_state"]["question_type"] == "calculation"
+
+
+def test_tool_call_limit_falls_back_to_calculation_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A misrouted counting question burns MAX_TOOL_CALLS and reroutes to SQL."""
+
+    def _distinct_tool_action(index: int) -> InformationAgentAction:
+        return InformationAgentAction(
+            action=InformationActionType.TOOL,
+            tool=InformationToolName.GET_COLUMN,
+            arguments=InformationToolArguments(
+                column_name=f"revenue_{index}",
+                table_name="orders",
+                database_name="sales",
+            ),
+        )
+
+    actions = iter(_distinct_tool_action(i) for i in range(10))
+    monkeypatch.setattr(
+        information_agent,
+        "invoke_with_structured_output",
+        lambda *_args, **_kwargs: next(actions),
+    )
+    monkeypatch.setattr(
+        information_agent,
+        "run_information_tool",
+        lambda *_args, **_kwargs: {"ok": True, "data": {}},
+    )
+
+    result = InformationAgent().execute(_state())
+
+    assert result["decision"] == "fallback"
+    path_state = result["path_state"]
+    assert path_state["question_type"] == "calculation"
+    assert path_state["calculation_subtype"] == "match_based"
+    assert path_state["sql_template"]
+    assert path_state["information_fallback"] is True
+    # The graph must not end here with the unhelpful fallback message.
+    assert "final_response" not in path_state
+    assert result["messages"] == []
+
+
+def test_successful_answer_does_not_trigger_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        information_agent,
+        "invoke_with_structured_output",
+        lambda *_args, **_kwargs: _answer_action(),
+    )
+
+    result = InformationAgent().execute(_state())
+
+    assert result["decision"] == "answered"
+    assert "information_fallback" not in result["path_state"]
+    assert result["path_state"]["question_type"] == "information"
+
+
+def test_fallback_triggers_at_most_once_per_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run that already fell back once must not reroute again."""
+    monkeypatch.setattr(
+        information_agent,
+        "invoke_with_structured_output",
+        lambda *_args, **_kwargs: None,
+    )
+
+    state = _state()
+    state["path_state"]["information_fallback"] = True
+
+    result = InformationAgent().execute(state)
+
+    assert result.get("decision") != "fallback"
+    response = result["path_state"]["final_response"]
+    assert "couldn't complete the metadata lookup safely" in response["response"]

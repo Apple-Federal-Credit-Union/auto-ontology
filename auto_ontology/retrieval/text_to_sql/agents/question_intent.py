@@ -350,16 +350,18 @@ def create_question_intent_prompt(
         if calculation_only
         else """
 ## Question types
-- information: asks about catalog or semantic metadata, including what a dataset,
-  table, or column means, contains, or connects to, and how an existing measure is
-  defined or calculated. "How is revenue calculated/defined?" is information because
-  it asks for the stored definition rather than requesting a result.
+- information: asks explicitly what a dataset, table, or column means, contains, connects
+  to, or how it is defined or calculated. "How is revenue calculated/defined?" is information
+  because it asks for the stored definition rather than requesting a result.
 - prediction: asks to predict, forecast, estimate, project, or assess the likelihood
   of a future or currently unknown outcome. A query about existing historical rows
   is not prediction merely because it contains a date.
 - calculation: asks the data system to match/filter, rank, compare, count, aggregate,
   compute, or interpret values. "Calculate revenue for 2026" is calculation because
-  it requests a derived value. If the type is uncertain, choose calculation.
+  it requests a derived value. A question asking for a count, total, number, list, or
+  value of data ("how many...", "what is the total...", "show...") is calculation
+  even when it names a business term that is in the glossary.
+If the type is uncertain, choose calculation.
 """
     )
 

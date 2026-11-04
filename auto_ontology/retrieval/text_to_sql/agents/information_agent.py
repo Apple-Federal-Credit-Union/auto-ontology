@@ -17,6 +17,11 @@ from auto_ontology.retrieval.text_to_sql.agents.information_tools import (
     InformationToolName,
     run_information_tool,
 )
+from auto_ontology.retrieval.text_to_sql.agents.question_intent import (
+    CALCULATION_SUBTYPE_DEFINITIONS,
+    CalculationSubtype,
+    QuestionType,
+)
 from auto_ontology.retrieval.text_to_sql.base import BaseAgent
 from auto_ontology.retrieval.text_to_sql.state import (
     AgentState,
@@ -280,6 +285,7 @@ class InformationAgent(BaseAgent):
         answer: str | None = None
         final_source_ids: list[str] = []
         tool_call_count = 0
+        used_fallback = False
 
         for _ in range(MAX_AGENT_ITERATIONS):
             prompt = _render_prompt(
@@ -298,6 +304,7 @@ class InformationAgent(BaseAgent):
                 action = None
 
             if action is None:
+                used_fallback = True
                 answer = _fallback_answer(
                     context, "The metadata reasoning step failed."
                 )
@@ -331,6 +338,7 @@ class InformationAgent(BaseAgent):
                 )
                 continue
             if tool_call_count >= MAX_TOOL_CALLS:
+                used_fallback = True
                 answer = _fallback_answer(
                     context, "The metadata lookup reached its tool-call limit."
                 )
@@ -371,9 +379,40 @@ class InformationAgent(BaseAgent):
             known_column_ids.update(_collect_column_ids(result))
 
         if answer is None:
+            used_fallback = True
             answer = _fallback_answer(
                 context, "The metadata lookup reached its reasoning limit."
             )
+
+        # A fallback answer means the metadata lookup never actually answered
+        # the question. Ending the graph here would hand the user that
+        # unhelpful message even when the question was really a calculation
+        # ("How many members...?") misrouted by intent classification — see
+        # route_after_information. Reroute to the normal SQL path once per
+        # run, guarded by ``information_fallback`` so a (currently
+        # unreachable) repeat visit to this node can't loop.
+        if used_fallback and not path_state.get("information_fallback"):
+            self.logger.info(
+                "Information agent could not answer the question; falling back "
+                "to the SQL path as a calculation"
+            )
+            fallback_subtype = CalculationSubtype.MATCH_BASED
+            new_path_state = {
+                **path_state,
+                "information_tool_calls": call_records,
+                "information_sources": [],
+                "information_fallback": True,
+                "question_type": QuestionType.CALCULATION.value,
+                "calculation_subtype": fallback_subtype.value,
+                "sql_template": CALCULATION_SUBTYPE_DEFINITIONS[fallback_subtype.value][
+                    "sql_template"
+                ],
+            }
+            return {
+                "messages": list(state.get("messages") or []),
+                "path_state": new_path_state,
+                "decision": "fallback",
+            }
 
         sources = [
             source_id for source_id in final_source_ids if source_id in known_source_ids
@@ -392,6 +431,7 @@ class InformationAgent(BaseAgent):
         return {
             "messages": list(state.get("messages") or []) + [AIMessage(content=answer)],
             "path_state": new_path_state,
+            "decision": "answered",
         }
 
 

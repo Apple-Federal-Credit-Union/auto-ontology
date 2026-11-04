@@ -25,6 +25,7 @@ from auto_ontology.retrieval.text_to_sql.agents.question_intent import (
 from auto_ontology.retrieval.text_to_sql.text_to_sql_graph import (
     _entry_router_fn,
     route_after_candidate_retrieval,
+    route_after_information,
     route_question_type_or_evidence,
 )
 
@@ -443,3 +444,29 @@ def test_information_routes_before_candidate_preparation(
     state = {"path_state": {"question_type": question_type}}
 
     assert route_after_candidate_retrieval(state) == route
+
+
+def test_route_after_information_retries_sql_path_on_fallback() -> None:
+    state = {"decision": "fallback", "path_state": {"question_type": "calculation"}}
+
+    assert route_after_information(state) == "prepare_candidates"
+
+
+def test_route_after_information_ends_on_a_real_answer() -> None:
+    state = {"decision": "answered", "path_state": {"question_type": "information"}}
+
+    assert route_after_information(state) == "end"
+
+
+def test_prompt_classifies_counting_questions_as_calculation() -> None:
+    prompt = create_question_intent_prompt(
+        "How many members does the credit union have?"
+    )
+    normalized = " ".join(prompt.split())
+
+    assert (
+        'A question asking for a count, total, number, list, or value of data ("how '
+        'many...", "what is the total...", "show...") is calculation even when it '
+        "names a business term that is in the glossary."
+    ) in normalized
+    assert "If the type is uncertain, choose calculation." in normalized

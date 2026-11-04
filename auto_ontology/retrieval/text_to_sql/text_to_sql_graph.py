@@ -263,6 +263,21 @@ def route_after_candidate_retrieval(state: AgentState) -> str:
     return "prepare_candidates"
 
 
+def route_after_information(state: AgentState) -> str:
+    """End on a real metadata answer; retry as a calculation when it fell back.
+
+    ``InformationAgent`` sets ``decision="fallback"`` (and flips
+    ``path_state["question_type"]`` to ``"calculation"``) when it could not
+    answer — e.g. a counting question misclassified as ``information`` burns
+    its tool-call budget. Routing those runs into ``prepare_candidates``
+    lets the normal SQL path answer instead of ending on the unhelpful
+    fallback message.
+    """
+    if state.get("decision") == "fallback":
+        return "prepare_candidates"
+    return "end"
+
+
 def _make_node(name, fn):
     """
     Create a node with logging wrapper.
@@ -473,7 +488,14 @@ def create_graph():
             "prepare_candidates": "prepare_candidates",
         },
     )
-    graph.add_edge("information_agent", END)
+    graph.add_conditional_edges(
+        "information_agent",
+        route_after_information,
+        {
+            "prepare_candidates": "prepare_candidates",
+            "end": END,
+        },
+    )
 
     if prediction_enabled:
         # The intent node classified the question before extraction. Routing waits
@@ -622,5 +644,6 @@ __all__ = [
     "create_graph",
     "get_question_for_processing",
     "route_after_candidate_retrieval",
+    "route_after_information",
     "route_sql_execution",
 ]
