@@ -465,8 +465,22 @@ def test_prompt_classifies_counting_questions_as_calculation() -> None:
     normalized = " ".join(prompt.split())
 
     assert (
-        'A question asking for a count, total, number, list, or value of data ("how '
-        'many...", "what is the total...", "show...") is calculation even when it '
-        "names a business term that is in the glossary."
+        "A question asking for a count, total, number, list, or value of data "
+        'values or rows ("how many...", "what is the total...", "show the top '
+        '5...") is calculation even when it names a business term that is in '
+        "the glossary."
     ) in normalized
     assert "If the type is uncertain, choose calculation." in normalized
+
+
+def test_prompt_keeps_catalog_listings_on_the_information_route() -> None:
+    prompt = create_question_intent_prompt("List the columns in orders")
+    normalized = " ".join(prompt.split())
+
+    assert (
+        "Listing catalog objects — which tables, columns, schemas, terms, or "
+        'definitions exist — stays information even when phrased as "list" or '
+        '"show": "List the columns in orders" and "Show all tables in this '
+        'schema" ask what the catalog contains, not for a result computed '
+        "from data."
+    ) in normalized

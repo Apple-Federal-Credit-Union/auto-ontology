@@ -270,6 +270,18 @@ def _restore_for_full_pipeline_retry(state: AgentState) -> AgentState:
     for key in _FULL_RETRY_PATH_KEYS_TO_CLEAR:
         restored_path_state.pop(key, None)
 
+    # information_fallback guards InformationAgent's SQL-fallback reroute
+    # against looping within one attempt (see InformationAgent.execute). It
+    # is set only during the attempt that just finished, never present in
+    # restore_from["path_state"] (the pre-run snapshot restored_path_state
+    # was just rebuilt from), so without carrying it forward explicitly a
+    # full-pipeline retry would silently re-arm the guard and let the
+    # metadata loop fall back a second time. Carried the same way
+    # full_pipeline_attempt is carried below — read off the just-finished
+    # state rather than the immutable boundary.
+    if (state.get("path_state") or {}).get("information_fallback"):
+        restored_path_state["information_fallback"] = True
+
     restored = dict(state)
     restored.update(
         {

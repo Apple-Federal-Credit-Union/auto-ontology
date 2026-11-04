@@ -184,6 +184,66 @@ def test_restore_discards_failed_attempt_mutations_and_messages() -> None:
     }
 
 
+def test_restore_carries_information_fallback_guard_across_retry() -> None:
+    """The guard against a repeat information-agent reroute must survive a
+    full-pipeline restart, not just the attempt that set it."""
+    state = _initial_state()
+    state.update(_unconstructable_update()["unconstructable_sql_response"])
+    state["path_state"]["information_fallback"] = True
+
+    restored = main._restore_for_full_pipeline_retry(state)
+
+    assert restored["path_state"]["information_fallback"] is True
+
+
+def test_restore_omits_information_fallback_when_never_set() -> None:
+    state = _initial_state()
+    state.update(_unconstructable_update()["unconstructable_sql_response"])
+
+    restored = main._restore_for_full_pipeline_retry(state)
+
+    assert "information_fallback" not in restored["path_state"]
+
+
+def test_stream_does_not_fall_back_a_second_time_after_full_pipeline_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fallback reroute followed by an unconstructable full-pipeline retry
+    must not let the information agent fall back again on the next attempt —
+    the guard has to survive ``_restore_for_full_pipeline_retry``."""
+    app = _AttemptApp(["failure", "failure"])
+    original_stream = app.stream
+
+    def stream_with_fallback_guard(
+        state: AgentState,
+        stream_mode: list[str] | None = None,
+        config: dict[str, Any] | None = None,
+    ) -> Iterator[Any]:
+        attempt_index = len(app.states)
+        if attempt_index == 1:
+            # The retry built from attempt 1's output must still carry the
+            # guard set below, or the information agent could reroute again.
+            assert state["path_state"].get("information_fallback") is True
+        for mode, chunk in original_stream(
+            state, stream_mode=stream_mode, config=config
+        ):
+            if mode == "updates":
+                chunk["unconstructable_sql_response"]["path_state"][
+                    "information_fallback"
+                ] = True
+            yield mode, chunk
+
+    monkeypatch.setattr(app, "stream", stream_with_fallback_guard)
+    monkeypatch.setattr(main, "_build_state", lambda _payload: _initial_state())
+    monkeypatch.setattr(main, "app", app)
+
+    events = list(main.stream_agent_response(_payload()))
+
+    assert len(app.states) == 2
+    assert app.states[1]["path_state"]["information_fallback"] is True
+    assert events[-1]["type"] == "result"
+
+
 def test_stream_retries_once_then_returns_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

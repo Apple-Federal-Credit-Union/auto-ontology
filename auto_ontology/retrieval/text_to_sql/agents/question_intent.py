@@ -359,8 +359,12 @@ def create_question_intent_prompt(
 - calculation: asks the data system to match/filter, rank, compare, count, aggregate,
   compute, or interpret values. "Calculate revenue for 2026" is calculation because
   it requests a derived value. A question asking for a count, total, number, list, or
-  value of data ("how many...", "what is the total...", "show...") is calculation
-  even when it names a business term that is in the glossary.
+  value of data values or rows ("how many...", "what is the total...", "show the top
+  5...") is calculation even when it names a business term that is in the glossary.
+  Listing catalog objects — which tables, columns, schemas, terms, or definitions
+  exist — stays information even when phrased as "list" or "show": "List the columns
+  in orders" and "Show all tables in this schema" ask what the catalog contains, not
+  for a result computed from data.
 If the type is uncertain, choose calculation.
 """
     )

@@ -13,6 +13,9 @@ from typing import Any, Dict
 from langchain_core.messages import AIMessage, SystemMessage
 from pydantic import Field, model_validator
 
+from auto_ontology.retrieval.text_to_sql.agents.candidates_preparation import (
+    has_preparation_scope,
+)
 from auto_ontology.retrieval.text_to_sql.agents.information_tools import (
     InformationToolName,
     run_information_tool,
@@ -391,7 +394,18 @@ class InformationAgent(BaseAgent):
         # route_after_information. Reroute to the normal SQL path once per
         # run, guarded by ``information_fallback`` so a (currently
         # unreachable) repeat visit to this node can't loop.
-        if used_fallback and not path_state.get("information_fallback"):
+        #
+        # Rerouting only helps when CandidatePreparationAgent can actually
+        # accept the resulting state: with no retrieved candidates and no
+        # usable database scope, its validate_input() rejects the run and
+        # raises AgentExecutionError, trading the metadata message for a
+        # hard failure. has_preparation_scope() is the same predicate
+        # validate_input() checks, so the two can't drift apart.
+        if (
+            used_fallback
+            and not path_state.get("information_fallback")
+            and has_preparation_scope(path_state, state.get("connectors") or [])
+        ):
             self.logger.info(
                 "Information agent could not answer the question; falling back "
                 "to the SQL path as a calculation"

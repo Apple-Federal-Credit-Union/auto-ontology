@@ -228,6 +228,30 @@ logger = logging.getLogger(__name__)
 _GRAPH_NODE_NAME = "prepare_candidates"
 
 
+def has_preparation_scope(path_state: dict, connectors: list[Any]) -> bool:
+    """Whether candidate preparation has anything to work with.
+
+    True when retrieval already found at least one candidate (a
+    ColumnAttribute, CustomAnalysis, or SqlAttribute hit), or there is a
+    usable database scope to search instead — an explicit ``target_db``, or
+    exactly one configured connector that names its own database.
+
+    ``CandidatePreparationAgent.validate_input`` and
+    ``InformationAgent``'s SQL-fallback reroute both call this instead of
+    each keeping their own copy, so the two checks can't drift: anything
+    that reroutes into candidate preparation must first confirm preparation
+    can actually accept the state, the same way preparation itself does.
+    """
+    has_col_attrs = bool(path_state.get("retrieved_column_attributes"))
+    has_custom = bool(path_state.get("retrieved_custom_analyses"))
+    has_sql_attrs = bool(path_state.get("retrieved_sql_attributes"))
+    if has_col_attrs or has_custom or has_sql_attrs:
+        return True
+    if path_state.get("target_db"):
+        return True
+    return len(connectors) == 1 and bool(getattr(connectors[0], "database_name", None))
+
+
 class CandidatePreparationAgent(BaseAgent):
     """
     Agent that prepares and fetches all candidates for SQL construction.
@@ -259,21 +283,14 @@ class CandidatePreparationAgent(BaseAgent):
     def validate_input(self, state: AgentState) -> bool:
         """Validate that retrieval produced at least one hit."""
         path_state = state.get("path_state", {})
-        has_col_attrs = bool(path_state.get("retrieved_column_attributes"))
-        has_custom = bool(path_state.get("retrieved_custom_analyses"))
-        has_sql_attrs = bool(path_state.get("retrieved_sql_attributes"))
-        if not has_col_attrs and not has_custom and not has_sql_attrs:
-            connectors = state.get("connectors") or []
-            if path_state.get("target_db") or (
-                len(connectors) == 1 and getattr(connectors[0], "database_name", None)
-            ):
-                return True
-            self.logger.warning(
-                "No candidates for preparation: expected retrieved_column_attributes, "
-                "retrieved_custom_analyses, or retrieved_sql_attributes in path_state"
-            )
-            return False
-        return True
+        connectors = state.get("connectors") or []
+        if has_preparation_scope(path_state, connectors):
+            return True
+        self.logger.warning(
+            "No candidates for preparation: expected retrieved_column_attributes, "
+            "retrieved_custom_analyses, or retrieved_sql_attributes in path_state"
+        )
+        return False
 
     def execute(self, state: AgentState) -> Dict[str, Any]:
         """

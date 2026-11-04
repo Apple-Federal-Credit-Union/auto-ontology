@@ -366,6 +366,49 @@ def test_successful_answer_does_not_trigger_fallback(
     assert result["path_state"]["question_type"] == "information"
 
 
+def test_fallback_without_preparation_scope_keeps_metadata_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No candidates and no usable database scope: stay terminal.
+
+    Rerouting here would hand the run to CandidatePreparationAgent with
+    nothing it can accept — no retrieved candidates, no target_db, and more
+    than one configured connector — so its validate_input() would reject the
+    state and raise AgentExecutionError instead of returning the metadata
+    message.
+    """
+    monkeypatch.setattr(
+        information_agent,
+        "invoke_with_structured_output",
+        lambda *_args, **_kwargs: None,
+    )
+
+    state = _state()
+    state["path_state"] = {
+        "question_type": "information",
+        "normalized_question": "How is revenue calculated?",
+        "entities": ["revenue"],
+        "retrieved_column_attributes": [],
+        "retrieved_sql_attributes": [],
+        "retrieved_custom_analyses": [],
+    }
+    state["connectors"] = [
+        MagicMock(database_name="sales"),
+        MagicMock(database_name="hr"),
+    ]
+
+    result = InformationAgent().execute(state)
+
+    assert result["decision"] == "answered"
+    path_state = result["path_state"]
+    assert "information_fallback" not in path_state
+    assert (
+        "couldn't complete the metadata lookup safely"
+        in (path_state["final_response"]["response"])
+    )
+    assert result["messages"][-1].content == path_state["final_response"]["response"]
+
+
 def test_fallback_triggers_at_most_once_per_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
