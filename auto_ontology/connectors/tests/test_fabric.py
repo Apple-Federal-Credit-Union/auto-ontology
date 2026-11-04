@@ -554,6 +554,52 @@ def test_parameterized_limit_is_refused_rather_than_misbound(
     assert driver.executed == []
 
 
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT * FROM (SELECT a FROM t LIMIT ?) x LIMIT 5",
+        "SELECT * FROM (SELECT a FROM t WHERE id = ? LIMIT ?) AS s LIMIT 10",
+        "WITH c AS (SELECT a FROM t WHERE b = ? LIMIT ?) SELECT a FROM c LIMIT 1",
+    ],
+    ids=["nested", "nested-after-predicate", "cte"],
+)
+def test_every_parameterized_limit_is_refused_not_just_the_first(sql: str) -> None:
+    """Rendering rewrites every LIMIT in the tree, so every one is checked."""
+    with pytest.raises(ReadOnlyViolation, match="parameterized LIMIT"):
+        prepare_read_only(sql)
+
+
+def test_nested_literal_limits_are_all_rewritten() -> None:
+    assert (
+        prepare_read_only(
+            "SELECT * FROM (SELECT a FROM t WHERE b = ? LIMIT 3) x LIMIT 5"
+        )
+        == "SELECT TOP 5 * FROM (SELECT TOP 3 a AS a FROM t WHERE b = ?) AS x"
+    )
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT TOP (?) a FROM dbo.t WHERE b = ?",
+        "SELECT * FROM (SELECT TOP (?) a FROM t WHERE b = ?) AS x",
+    ],
+)
+def test_native_parameterized_top_is_sent_unchanged(
+    driver: FakeDriver, sql: str
+) -> None:
+    """``TOP (?)`` needs no rewrite, so its placeholders are already in order."""
+    FabricDatabase(URL).execute(sql, parameters=[5, "x"])
+
+    assert driver.executed == [(sql, [5, "x"], 0)]
+
+
+def test_native_parameterized_top_beside_a_limit_is_refused() -> None:
+    """Once a LIMIT forces a re-render, a ``TOP (?)`` can't be told apart from it."""
+    with pytest.raises(ReadOnlyViolation, match="parameterized LIMIT"):
+        prepare_read_only("SELECT TOP (?) a FROM (SELECT a FROM t LIMIT 5) AS x")
+
+
 # ----------------------------------------------------------------------
 # Metadata
 # ----------------------------------------------------------------------
@@ -582,19 +628,60 @@ def test_get_tables_shape_and_system_schemas(driver: FakeDriver) -> None:
         assert schema in sql
 
 
-def test_schema_allowlist_is_case_insensitive(driver: FakeDriver) -> None:
-    driver.respond = _answer(
+SCHEMA_LIST = "SELECT name FROM sys.schemas"
+
+
+def _tables_in(*schemas: str) -> Responder:
+    """Answer the schema list and one table per schema, named after its schema."""
+    return _answer(
         {
+            SCHEMA_LIST: (["name"], [(schema,) for schema in schemas]),
             "INFORMATION_SCHEMA.TABLES": (
                 ["table_schema", "table_name", "table_type"],
-                [("dbo", "a", "base table"), ("Sales", "b", "base table")],
-            )
+                [(schema, f"t_{schema}", "base table") for schema in schemas],
+            ),
         }
     )
 
+
+def test_schema_allowlist_falls_back_to_case_insensitive(driver: FakeDriver) -> None:
+    driver.respond = _tables_in("dbo", "Sales")
+
     frame = FabricDatabase(URL, schemas=["sales"]).get_tables()
 
-    assert frame["table_name"].tolist() == ["b"]
+    assert frame["table_schema"].tolist() == ["Sales"]
+    assert frame["table_name"].tolist() == ["t_Sales"]
+
+
+def test_schema_allowlist_exact_name_excludes_case_variants(
+    driver: FakeDriver,
+) -> None:
+    """``Sales`` and ``sales`` are distinct schemas under a case-sensitive collation."""
+    driver.respond = _tables_in("dbo", "Sales", "sales")
+
+    assert FabricDatabase(URL, schemas=["Sales"]).get_tables()[
+        "table_schema"
+    ].tolist() == ["Sales"]
+    assert FabricDatabase(URL, schemas=["sales"]).get_tables()[
+        "table_schema"
+    ].tolist() == ["sales"]
+
+
+def test_schema_allowlist_resolves_against_every_schema_not_one_read(
+    driver: FakeDriver,
+) -> None:
+    """A read holding only ``sales`` rows must not satisfy an allowlist of ``Sales``."""
+    driver.respond = _answer(
+        {
+            SCHEMA_LIST: (["name"], [("Sales",), ("sales",)]),
+            "sys.views": (
+                ["table_schema", "table_name", "view_definition"],
+                [("sales", "v", "CREATE VIEW sales.v AS SELECT 1 AS a")],
+            ),
+        }
+    )
+
+    assert FabricDatabase(URL, schemas=["Sales"]).get_views().empty
 
 
 def test_get_columns_reports_boolean_nullability(driver: FakeDriver) -> None:
@@ -791,6 +878,80 @@ def test_get_queries_is_empty_without_query_insights(
 
     assert frame.empty and list(frame.columns) == ["end_time", "query_text"]
     assert "queryinsights.exec_requests_history" in caplog.text
+
+
+QUERY_INSIGHTS_DENIED = FakeError(
+    "42000",
+    "[42000] [Microsoft][ODBC Driver 18 for SQL Server][SQL Server]The SELECT "
+    "permission was denied on the object 'exec_requests_history', database "
+    "'sales_wh', schema 'queryinsights'. (229) (SQLExecDirectW)",
+)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        QUERY_INSIGHTS_DENIED,
+        FakeError(
+            "42000",
+            "[SQL Server]The SELECT permission was denied on the column "
+            "'command' of the object 'exec_requests_history'. (230)",
+        ),
+        FakeError("42501", "permission denied"),
+    ],
+    ids=["msg-229", "msg-230", "sqlstate-42501"],
+)
+def test_get_queries_skips_an_unreadable_query_insights(
+    driver: FakeDriver, caplog: LogCaptureFixture, error: FakeError
+) -> None:
+    """A Viewer cannot read Query Insights; that must not fail the whole ingest."""
+    driver.respond = _answer({"queryinsights": error})
+    database = FabricDatabase(URL)
+
+    with caplog.at_level(logging.DEBUG, logger="auto_ontology.connectors.fabric"):
+        first = database.get_queries()
+        second = database.get_queries()
+
+    assert first.empty and list(first.columns) == ["end_time", "query_text"]
+    assert second.empty
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "no permission to read" in warnings[0].getMessage()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        FakeError("28000", "[SQL Server]Login failed for user '<token-identified>'"),
+        FakeError("08S01", "[Microsoft][ODBC Driver 18]Communication link failure"),
+        FakeError("HYT00", "[Microsoft] Login timeout expired"),
+        FakeError("42000", "[SQL Server]Incorrect syntax near 'FROM'. (102)"),
+    ],
+    ids=["login-failed", "transport-failure", "login-timeout", "other-42000"],
+)
+def test_get_queries_still_raises_auth_and_transport_failures(
+    driver: FakeDriver, error: FakeError
+) -> None:
+    driver.respond = _answer({"queryinsights": error})
+
+    with pytest.raises(FakeError):
+        FabricDatabase(URL).get_queries()
+
+
+def test_permission_denied_on_keys_is_not_swallowed(driver: FakeDriver) -> None:
+    """An empty PK/FK frame erases stored keys, so a denial there must raise."""
+    driver.respond = _answer(
+        {
+            "sys.key_constraints": QUERY_INSIGHTS_DENIED,
+            "sys.foreign_keys": QUERY_INSIGHTS_DENIED,
+        }
+    )
+    database = FabricDatabase(URL)
+
+    with pytest.raises(FakeError):
+        database.get_pks()
+    with pytest.raises(FakeError):
+        database.get_fks()
 
 
 def test_metadata_errors_other_than_constraints_propagate(driver: FakeDriver) -> None:

@@ -109,6 +109,17 @@ modes use a service principal (client ID and secret):
   the UI): the connector obtains the access token through `azure-identity` and
   hands it to the driver. Requires `tenant_id`.
 
+**Use `auth=token` for service principals.** It is the more robust of the two,
+although driver sign-in stays the default. With driver sign-in, the ODBC
+driver runs the Entra sign-in itself, inside the connect call. That depends
+on how the driver was built and what it can reach from the container. In one
+container image it hung past its login timeout. With the same credentials,
+`auth=token` connected in under a second. The token path gets its token over
+plain HTTPS through `azure-identity`, which also caches and renews it. The
+driver then only receives a ready token
+(`SQL_COPT_SS_ACCESS_TOKEN`), so a sign-in failure surfaces as a clear
+`azure-identity` error rather than a stalled connection.
+
 ### Permissions
 
 The service principal needs:
@@ -121,6 +132,17 @@ The service principal needs:
 
 A Fabric administrator must also allow service principals to use Fabric APIs
 in the tenant settings. Write access is never needed.
+
+Query history comes from Query Insights, which needs **Contributor** or
+higher. Under Viewer, ingestion logs one warning and continues without query
+history. A login, authentication, or connection failure still fails the
+ingest.
+
+A schema allowlist entry that exactly matches a schema name selects only that
+schema. Fabric's default collation is case-sensitive, so `Sales` and `sales`
+can be different schemas. An entry with no exact match falls back to a
+case-insensitive match. Schema names are always returned in their original
+case.
 
 ## Vault
 

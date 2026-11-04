@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import struct
 import threading
 import time
@@ -56,6 +57,7 @@ import sqlglot
 from sqlglot import exp
 from sqlglot.dialects import DIALECTS
 from sqlglot.errors import SqlglotError
+from sqlglot.tokens import TokenType
 
 from auto_ontology.catalog.constants import TableTypes
 from auto_ontology.connectors.base import SQLDatabase, StatementTimeout
@@ -278,6 +280,34 @@ def _is_unsupported_feature(error: BaseException) -> bool:
     return _sqlstate(error) == _UNSUPPORTED_FEATURE_SQLSTATE
 
 
+# The principal reached the database but may not read one object: SQL Server
+# Msg 229 (object permission denied) or 230 (column permission denied). The
+# driver reports both under the generic 42000, so the native error number in
+# the message is what identifies them; 42501 is the standard SQLSTATE for the
+# same denial. A login failure (28000) or a dropped connection (08S01) is none
+# of these.
+_ACCESS_DENIED_SQLSTATE = "42501"
+_ACCESS_DENIED_NATIVE = re.compile(r"\((?:229|230)\)")
+
+
+def _is_access_denied(error: BaseException) -> bool:
+    """Whether *error* is a permission denial on an object, not on the login."""
+    sqlstate = _sqlstate(error)
+    if sqlstate == _ACCESS_DENIED_SQLSTATE:
+        return True
+    return sqlstate == "42000" and bool(_ACCESS_DENIED_NATIVE.search(str(error)))
+
+
+def _has_limit_keyword(sql: str, dialect: str) -> bool:
+    """Whether *sql* spells a row cap as ``LIMIT``, which T-SQL lacks.
+
+    sqlglot parses ``LIMIT n`` and T-SQL's native ``TOP n`` into the same
+    ``exp.Limit`` node, so only the tokens tell them apart.
+    """
+    tokens = sqlglot.Dialect.get_or_raise(dialect).tokenize(sql)
+    return any(token.token_type == TokenType.LIMIT for token in tokens)
+
+
 def prepare_read_only(sql: str, dialect: str = _DIALECT) -> str:
     """Return the text to send for *sql*, refusing anything but one read query.
 
@@ -285,8 +315,8 @@ def prepare_read_only(sql: str, dialect: str = _DIALECT) -> str:
     without a tree there is no telling a read from a write.
 
     A query carrying ``LIMIT`` -- which T-SQL lacks, but which the profiling and
-    probe queries emit -- is re-rendered so it becomes ``TOP``. Everything else
-    is sent exactly as written.
+    probe queries emit -- is re-rendered so it becomes ``TOP``. Everything else,
+    native ``TOP (?)`` included, is sent exactly as written.
 
     Raises:
         ReadOnlyViolation: *sql* is empty, unparseable, more than one
@@ -308,24 +338,25 @@ def prepare_read_only(sql: str, dialect: str = _DIALECT) -> str:
             "Fabric connector is read-only: only SELECT and WITH queries are "
             f"allowed, not {tree.key.upper()}"
         )
-    limit = tree.find(exp.Limit)
-    if limit is not None:
-        # Rendering for a dialect without LIMIT (T-SQL/Fabric) moves it to a
-        # leading ``TOP``, which only reorders the generated SQL's ``?``
-        # placeholders relative to one another if the LIMIT's own value is one
-        # -- a literal LIMIT carries no placeholder to move, so every other
-        # placeholder keeps its original position either way. ``execute()``
-        # passes the caller's parameter list positionally against whatever SQL
-        # is actually sent, so a parameterized LIMIT would silently bind values
-        # to the wrong placeholders instead of just failing loudly.
-        if not isinstance(limit.expression, exp.Literal):
+    if not _has_limit_keyword(sql, dialect):
+        return sql
+    # Rendering for a dialect without LIMIT (T-SQL/Fabric) moves every LIMIT in
+    # the tree -- subqueries and CTEs included -- to a leading ``TOP``, which
+    # reorders the ``?`` placeholders only if a limit's own value holds one.
+    # ``execute()`` binds the caller's parameter list positionally against the
+    # SQL actually sent, so a parameterized limit anywhere in the tree would
+    # silently bind values to the wrong placeholders. A native ``TOP (?)`` in
+    # the same statement is indistinguishable from a LIMIT once parsed, so it
+    # is refused too rather than guessed at.
+    for limit in tree.find_all(exp.Limit):
+        if limit.find(exp.Placeholder) is not None:
             raise ReadOnlyViolation(
                 "Fabric connector cannot rewrite a parameterized LIMIT to TOP "
                 "without reordering positional '?' parameters; use a literal "
-                "LIMIT (e.g. 'LIMIT 100') instead of a bound one"
+                "LIMIT (e.g. 'LIMIT 100'), or write the query with TOP (?) "
+                "and no LIMIT"
             )
-        return tree.sql(dialect=dialect)
-    return sql
+    return tree.sql(dialect=dialect)
 
 
 def _literal_list(values: tuple[str, ...]) -> str:
@@ -333,6 +364,32 @@ def _literal_list(values: tuple[str, ...]) -> str:
 
 
 _NOT_SYSTEM = f"NOT IN ({_literal_list(_SYSTEM_SCHEMAS)})"
+
+
+def _resolve_schema_allowlist(
+    requested: Iterable[str], available: Iterable[str]
+) -> frozenset[str]:
+    """Map allowlist entries onto the database's schema names, original case kept.
+
+    Fabric's default collation is case-sensitive, so ``Sales`` and ``sales``
+    can be distinct schemas. An entry that names a schema exactly selects that
+    schema alone; only an entry with no exact match falls back to the schemas
+    equal to it case-insensitively, so a hand-typed ``SALES`` still finds
+    ``Sales``.
+    """
+    available = list(available)
+    exact = set(available)
+    resolved: set[str] = set()
+    for name in requested:
+        if name in exact:
+            resolved.add(name)
+            continue
+        folded = name.casefold()
+        matches = {schema for schema in available if schema.casefold() == folded}
+        if not matches:
+            logger.warning("Fabric schema allowlist entry %r matches no schema", name)
+        resolved |= matches
+    return frozenset(resolved)
 
 
 class FabricDatabase(SQLDatabase):
@@ -343,8 +400,9 @@ class FabricDatabase(SQLDatabase):
     connection_string:
         ``fabric://client_id:secret@<workspace>.datawarehouse.fabric.microsoft.com/<database>``
     schemas:
-        Optional ingestion allowlist, matched case-insensitively. Empty or
-        ``None`` means every schema except the system ones.
+        Optional ingestion allowlist. Empty or ``None`` means every schema
+        except the system ones. See :func:`_resolve_schema_allowlist` for how
+        names are matched.
     """
 
     supports_statement_timeout = True
@@ -356,17 +414,18 @@ class FabricDatabase(SQLDatabase):
     ) -> None:
         self._settings = _parse_connection_string(connection_string)
         self._database_name = str(self._settings["database"])
-        self._schema_filter: set[str] | None = {
-            s.strip().casefold() for s in (schemas or []) if s and s.strip()
-        } or None
-        if self._schema_filter:
+        self._schema_allowlist: tuple[str, ...] = tuple(
+            dict.fromkeys(s.strip() for s in (schemas or []) if s and s.strip())
+        )
+        if self._schema_allowlist:
             logger.info(
                 "Fabric ingestion restricted to schemas: %s",
-                sorted(self._schema_filter),
+                list(self._schema_allowlist),
             )
         self._lock = threading.RLock()
         self._connection: Any = None
         self._credential: Any = None
+        self._denied_reads: set[str] = set()
 
     # ------------------------------------------------------------------
     # Transport
@@ -529,23 +588,29 @@ class FabricDatabase(SQLDatabase):
     def _keep_schemas(self, frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
         """Shape *frame* to *columns* and drop rows outside the schema allowlist.
 
-        Filtered here rather than in SQL: the default collation is
-        case-sensitive, and the allowlist is matched case-insensitively.
+        Rows keep the schema names exactly as Fabric returns them. The
+        allowlist is resolved against the database's real schema names first,
+        so a read that happens to contain only ``sales`` cannot pick it up for
+        an allowlist that named a distinct ``Sales``.
         """
         if frame.empty:
             return pd.DataFrame(columns=columns)
-        if self._schema_filter is not None:
-            keep = (
-                frame["table_schema"]
-                .astype(str)
-                .str.casefold()
-                .isin(self._schema_filter)
+        if self._schema_allowlist:
+            allowed = _resolve_schema_allowlist(
+                self._schema_allowlist, self.get_schemas()
             )
+            keep = frame["table_schema"].astype(str).isin(allowed)
             frame = frame.loc[keep].reset_index(drop=True)
         return frame[columns]
 
     def _optional_read(
-        self, what: str, sql: str, columns: list[str], *, level: int = logging.DEBUG
+        self,
+        what: str,
+        sql: str,
+        columns: list[str],
+        *,
+        level: int = logging.DEBUG,
+        skip_if_denied: bool = False,
     ) -> pd.DataFrame:
         """Run a metadata read that some Fabric items do not support.
 
@@ -554,10 +619,16 @@ class FabricDatabase(SQLDatabase):
         not an ingestion failure -- the item simply has none of *what* -- so it
         yields an empty, correctly shaped frame.
 
-        Anything else -- the login timed out, the connection dropped and the
-        reconnect-and-retry in :meth:`execute` still failed, a permissions
-        denial -- is not this connector's to swallow. It is re-raised with its
-        message and SQLSTATE intact, the same as every other read, so
+        With *skip_if_denied*, a permission denial on the object being read
+        (Msg 229/230) is treated the same way and logged once per connector:
+        the principal simply cannot see *what*, and one unreadable optional
+        object must not fail the whole database. Only reads whose empty result
+        is harmless may opt in -- an empty PK/FK frame erases stored keys.
+
+        Anything else -- the login failed or timed out, the connection dropped
+        and the reconnect-and-retry in :meth:`execute` still failed -- is not
+        this connector's to swallow. It is re-raised with its message and
+        SQLSTATE intact, the same as every other read, so
         :mod:`auto_ontology.connectors.db_errors` can classify it upstream
         instead of ingestion silently reporting an empty catalog.
         """
@@ -565,6 +636,17 @@ class FabricDatabase(SQLDatabase):
         try:
             frame = self.execute(sql)
         except pyodbc.Error as exc:
+            if skip_if_denied and _is_access_denied(exc):
+                first = what not in self._denied_reads
+                self._denied_reads.add(what)
+                logger.log(
+                    logging.WARNING if first else logging.DEBUG,
+                    "Fabric database %s: no permission to read %s (%s); skipping it",
+                    self._database_name,
+                    what,
+                    _sqlstate(exc),
+                )
+                return pd.DataFrame(columns=columns)
             if not _is_unsupported_feature(exc):
                 raise
             logger.log(
@@ -707,9 +789,10 @@ class FabricDatabase(SQLDatabase):
     def get_queries(self, hours: int = 24) -> pd.DataFrame:
         """Return recent successful statements from Query Insights.
 
-        ``queryinsights.exec_requests_history`` is populated asynchronously and
-        is missing on items or capacities without Query Insights; either way
-        the result is simply empty.
+        ``queryinsights.exec_requests_history`` is populated asynchronously, is
+        missing on items or capacities without Query Insights, and needs
+        Contributor or higher to read, which a Viewer principal lacks; in each
+        case the result is simply empty.
         """
         return self._optional_read(
             "queryinsights.exec_requests_history",
@@ -725,6 +808,7 @@ class FabricDatabase(SQLDatabase):
             """,
             _QUERY_SCHEMA,
             level=logging.INFO,
+            skip_if_denied=True,
         )
 
     # ------------------------------------------------------------------
