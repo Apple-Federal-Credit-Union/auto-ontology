@@ -60,8 +60,6 @@ _TEXT_PREFIXED_MODELS = ("nemotron-3.5-embed-1b-nvfp4",)
 _EMBED_ENDPOINT = resolve("EMBED", "ENDPOINT")
 _EMBED_MODEL = resolve("EMBED", "MODEL")
 _EMBED_API_KEY = resolve("EMBED", "API_KEY")
-# None when unset -- see model_config.embed_dimensions for why that matters.
-_EMBED_DIMENSIONS = embed_dimensions()
 
 # Per-request retries inside the client, for 408/409/429/5xx and dropped
 # connections. They back off for seconds; the chunk-level retry below is the
@@ -102,11 +100,13 @@ class EmbedParams:
     inference_batch_size: int = 32
     nim_http_max_concurrent: int = 32
     request_timeout_s: float = 600.0
-    # None means "use the model's native width": no `dimensions` field is sent
-    # and returned vectors are expected to be EMBED_DIMENSIONS_DEFAULT wide.
-    # Set (via EMBED_DIMENSIONS) for a Matryoshka-capable model whose native
-    # size isn't 2048, or to shrink/grow an OpenAI-compatible model's output.
-    dimensions: int | None = None
+    # Defaults to the configured EMBED_DIMENSIONS so every construction --
+    # not just get_embed_params() below -- honours it without the caller
+    # having to remember to pass it. None (EMBED_DIMENSIONS unset) means "use
+    # the model's native width": no `dimensions` field is sent and returned
+    # vectors are expected to be EMBED_DIMENSIONS_DEFAULT wide. Pass an
+    # explicit value to override, e.g. in tests exercising a specific width.
+    dimensions: int | None = field(default_factory=embed_dimensions)
 
 
 def get_embed_params() -> EmbedParams:
@@ -114,7 +114,6 @@ def get_embed_params() -> EmbedParams:
         embed_invoke_url=_EMBED_ENDPOINT,
         model_name=_EMBED_MODEL,
         api_key=_EMBED_API_KEY,
-        dimensions=_EMBED_DIMENSIONS,
     )
 
 

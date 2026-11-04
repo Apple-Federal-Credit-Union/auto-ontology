@@ -305,6 +305,36 @@ def test_sample_match_sql_quotes_location_and_compares_as_text() -> None:
     assert sql.endswith("LIMIT 2")
 
 
+def test_build_retriever_sends_configured_dimensions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The FK retriever's ``EmbedParams`` is a direct construction too -- it
+    must pick up EMBED_DIMENSIONS, not silently omit it.
+    """
+    monkeypatch.setattr(semantic_fk, "_NVIDIA_API_KEY", "key")
+    monkeypatch.setattr(semantic_fk, "get_semantic_vdb", lambda **_: MagicMock())
+    monkeypatch.setenv("EMBED_DIMENSIONS", "2048")
+
+    retriever = semantic_fk._build_retriever("shop")
+
+    assert retriever is not None
+    assert retriever.embed_params.dimensions == 2048
+
+
+def test_build_retriever_unset_dimensions_sends_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(semantic_fk, "_NVIDIA_API_KEY", "key")
+    monkeypatch.setattr(semantic_fk, "get_semantic_vdb", lambda **_: MagicMock())
+    monkeypatch.delenv("EMBED_DIMENSIONS", raising=False)
+    monkeypatch.delenv("DEFAULT_MODELS_DIMENSIONS", raising=False)
+
+    retriever = semantic_fk._build_retriever("shop")
+
+    assert retriever is not None
+    assert retriever.embed_params.dimensions is None
+
+
 def test_resolution_logs_candidate_progress(caplog: pytest.LogCaptureFixture) -> None:
     candidates = [
         {"id": "col-1", "name": "customer_id", "table_name": "orders"},

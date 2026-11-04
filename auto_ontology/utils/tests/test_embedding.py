@@ -303,6 +303,25 @@ def test_unset_dimensions_sends_no_dimensions_kwarg(endpoint) -> None:
     assert "dimensions" not in json.loads(seen[0].content)
 
 
+def test_embed_params_defaults_dimensions_to_embed_dimensions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``EmbedParams.dimensions`` defaults to the configured EMBED_DIMENSIONS
+    so a direct construction that forgets to pass it still honours the
+    setting -- the bug this default factory exists to close.
+    """
+    monkeypatch.setenv("EMBED_DIMENSIONS", "2048")
+    assert _params().dimensions == 2048
+
+
+def test_embed_params_default_stays_none_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EMBED_DIMENSIONS", raising=False)
+    monkeypatch.delenv("DEFAULT_MODELS_DIMENSIONS", raising=False)
+    assert _params().dimensions is None
+
+
 def test_set_dimensions_sends_the_kwarg_and_is_honoured(endpoint) -> None:
     seen = endpoint(_ok)
     vectors = embed_texts(["a"], _params(dimensions=1024), "passage")
